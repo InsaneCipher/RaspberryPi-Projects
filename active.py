@@ -1,249 +1,412 @@
+import pygame
 import os
 import time
 import math
-import pygame
-from rgbmatrix import RGBMatrix, RGBMatrixOptions, graphics
+from rgbmatrix import RGBMatrix, RGBMatrixOptions
 from rgbmatrix.graphics import Color
+from Utils.menu_utils import ExitOnBack
 
 # -------------------------------------------------
-# CAROUSEL GAME MENU (LED MATRIX, BDF FONT)
-#
-# - Scans GAMES_DIR for .py files
-# - Navigate LEFT/RIGHT through files (carousel wrap)
-# - Displays first 3 characters of filename using a BDF font
-# - A = launch selected game
-# - B = refresh file list
-# - BACK = exit
+# 1v1 FIGHT GAME (DUAL PANEL AS ONE ARENA, 128x64)
+# (your existing header unchanged)
 # -------------------------------------------------
 
 # ----------------------------
-# CONFIG
-# ----------------------------
-GAMES_DIR = "/home/rpi-kristof/games"
-ONLY_SUFFIX = ".py"
-FONT_PATH = "/home/rpi-kristof/rpi-rgb-led-matrix/fonts/6x10.bdf"
-
-A_BTN = 0
-B_BTN = 1
-BACK_BTN = 6
-
-DEADZONE = 0.4
-MOVE_DELAY = 0.18
-LAUNCH_DEBOUNCE = 0.35
-
-# Matrix / panels
-PANEL_W = 64
-PANEL_H = 64
-CHAIN_LENGTH = 2  # set to 1 if you want menu only on one panel
-
-# Visuals
-BG = Color(0, 0, 0)
-FG = Color(255, 255, 255)
-ACCENT = Color(0, 255, 255)
-ERR = Color(255, 0, 0)
-
-ARROW_H = 14
-
-# ----------------------------
-# INIT (pygame + matrix + font)
+# INIT (pygame + controllers)
 # ----------------------------
 pygame.init()
 pygame.joystick.init()
 
-if pygame.joystick.get_count() < 1:
-    print("No controller detected", flush=True)
+if pygame.joystick.get_count() < 2:
+    print("Need two controllers")
     raise SystemExit(1)
 
-js = pygame.joystick.Joystick(0)
-js.init()
+pad1 = pygame.joystick.Joystick(0)
+pad2 = pygame.joystick.Joystick(1)
+pad1.init()
+pad2.init()
 
+# ----------------------------
+# INIT (matrix)
+# ----------------------------
 options = RGBMatrixOptions()
 options.hardware_mapping = "adafruit-hat"
 options.rows = 64
 options.cols = 64
-options.chain_length = CHAIN_LENGTH
+options.chain_length = 2
 options.brightness = 50
 options.gpio_slowdown = 4
 
 matrix = RGBMatrix(options=options)
 canvas = matrix.CreateFrameCanvas()
 
-font = graphics.Font()
-font.LoadFont("/home/rpi-kristof/rpi-rgb-led-matrix/fonts/6x10.bdf")
+# ----------------------------
+# CONSTANTS
+# ----------------------------
+W = 128
+H = 64
+
+HP_BAR_H = 6
+PLAY_H = H - HP_BAR_H
+GROUND_Y = PLAY_H - 1
+
+# buttons (Xbox-style mapping commonly used by pygame)
+A_BTN = 0
+B_BTN = 1
+X_BTN = 2
+Y_BTN = 3
+BACK_BTN = 6
+
+AXIS_X = 0
+AXIS_Y = 1
+DEADZONE = 0.35
+
+# player visuals
+P1_COLOR = Color(0, 255, 0)    # green
+P2_COLOR = Color(0, 0, 255)    # blue
+HIT_FLASH = Color(255, 0, 0)   # red
+BLOCK_COLOR = Color(255, 255, 0)
+
+BG = Color(0, 0, 0)
+FLOOR = Color(40, 40, 40)
+
+# physics
+GRAVITY = 80.0          # px/s^2
+MOVE_SPEED = 45.0       # px/s
+JUMP_VEL = -42.0        # px/s
+
+# player body sizes
+STAND_W = 8
+STAND_H = 14
+CROUCH_H = 9
+
+# game
+MAX_HP = 10
+HIT_FLASH_TIME = 0.18
+
+# attacks
+LIGHT_DMG = 1
+LIGHT_RANGE = 12
+LIGHT_ACTIVE = 0.12
+LIGHT_COOLDOWN = 0.28
+HEAVY_DMG = 2
+HEAVY_RANGE = 16
+HEAVY_WINDUP = 0.14
+HEAVY_ACTIVE = 0.14
+HEAVY_COOLDOWN = 0.55
+BLOCK_MULT = 0.25  # takes 25% damage while blocking (rounded up to at least 1 if >0)
 
 # ----------------------------
-# FILE SCAN
+# HELPERS
 # ----------------------------
-def load_games():
-    if not os.path.isdir(GAMES_DIR):
-        return []
-    out = []
-    for f in os.listdir(GAMES_DIR):
-        if f.startswith("."):
-            continue
-        path = os.path.join(GAMES_DIR, f)
-        if os.path.isfile(path) and f.lower().endswith(ONLY_SUFFIX):
-            out.append(f)
-    return sorted(out)
+def clamp(v, lo, hi):
+    return lo if v < lo else hi if v > hi else v
 
-games = load_games()
-idx = 0
-
-# ----------------------------
-# DRAW HELPERS
-# ----------------------------
-def clear_panel(cv, x0):
-    for y in range(PANEL_H):
-        for x in range(x0, x0 + PANEL_W):
-            cv.SetPixel(x, y, 0, 0, 0)
-
-def set_pixel(cv, x, y, c):
-    if 0 <= x < (PANEL_W * CHAIN_LENGTH) and 0 <= y < PANEL_H:
-        cv.SetPixel(x, y, c.red, c.green, c.blue)
-
-def text_width_px(text: str) -> int:
-    # graphics.Font() provides CharacterWidth for each glyph
-    return sum(font.CharacterWidth(ord(c)) for c in text)
-
-def draw_text_center(cv, x0, baseline_y, text, color):
-    w = text_width_px(text)
-    start_x = x0 + (PANEL_W - w) // 2
-    graphics.DrawText(cv, font, start_x, baseline_y, color, text)
-
-def draw_arrow_left(cv, x0, color):
-    cx = 8
-    cy = PANEL_H // 2
-    for dy in range(-ARROW_H // 2, ARROW_H // 2):
-        w = max(0, (ARROW_H // 2) - abs(dy))
-        for dx in range(w):
-            set_pixel(cv, x0 + cx - dx, cy + dy, color)
-
-def draw_arrow_right(cv, x0, color):
-    cx = PANEL_W - 9
-    cy = PANEL_H // 2
-    for dy in range(-ARROW_H // 2, ARROW_H // 2):
-        w = max(0, (ARROW_H // 2) - abs(dy))
-        for dx in range(w):
-            set_pixel(cv, x0 + cx + dx, cy + dy, color)
-
-def draw_index_dots(cv, x0, current, total, color_on, color_off):
-    if total <= 1:
+def fill_rect(cv, x0, y0, w, h, c):
+    x1 = x0 + w
+    y1 = y0 + h
+    if x1 <= 0 or y1 <= 0 or x0 >= W or y0 >= H:
         return
-    shown = min(10, total)
-    dot_i = int((current / (total - 1)) * (shown - 1)) if total > 1 else 0
+    x0 = max(0, x0); y0 = max(0, y0)
+    x1 = min(W, x1); y1 = min(H, y1)
+    for y in range(y0, y1):
+        for x in range(x0, x1):
+            cv.SetPixel(x, y, c.red, c.green, c.blue)
 
-    y = PANEL_H - 6
-    start_x = (PANEL_W - (shown * 5 - 1)) // 2
-    for i in range(shown):
-        c = color_on if i == dot_i else color_off
-        x = start_x + i * 5
-        for yy in range(2):
-            for xx in range(2):
-                set_pixel(cv, x0 + x + xx, y + yy, c)
+def draw_floor(cv):
+    y = PLAY_H - 1
+    for x in range(W):
+        cv.SetPixel(x, y, FLOOR.red, FLOOR.green, FLOOR.blue)
 
-def draw_menu(cv, files, current_idx, now):
-    panels = [0] if CHAIN_LENGTH == 1 else [0, 64]
-
-    pulse = (math.sin(now * 4.0) + 1) / 2
-    accent = Color(
-        int(ACCENT.red * (0.5 + 0.5 * pulse)),
-        int(ACCENT.green * (0.5 + 0.5 * pulse)),
-        int(ACCENT.blue * (0.5 + 0.5 * pulse)),
-    )
-
-    for x0 in panels:
-        clear_panel(cv, x0)
-
-        if not files:
-            # baseline_y ~ 32-40 looks good for 6x10
-            draw_text_center(cv, x0, 28, "NO", ERR)
-            draw_text_center(cv, x0, 42, "PY", ERR)
-            continue
-
-        name = files[current_idx]
-        base = os.path.splitext(name)[0]
-        label = base[:3].upper().ljust(3)
-
-        draw_arrow_left(cv, x0, accent)
-        draw_arrow_right(cv, x0, accent)
-
-        # center the 3 letters; baseline_y adjusted for 6x10
-        draw_text_center(cv, x0, 38, label, FG)
-
-        draw_index_dots(cv, x0, current_idx, len(files), accent, Color(20, 20, 20))
-
-        # small triangle badge top-right
-        bx = PANEL_W - 6
-        by = 4
-        set_pixel(cv, x0 + bx, by, accent)
-        set_pixel(cv, x0 + bx - 1, by + 1, accent)
-        set_pixel(cv, x0 + bx, by + 1, accent)
-        set_pixel(cv, x0 + bx - 2, by + 2, accent)
-        set_pixel(cv, x0 + bx - 1, by + 2, accent)
-        set_pixel(cv, x0 + bx, by + 2, accent)
+def rects_overlap(ax, ay, aw, ah, bx, by, bw, bh):
+    return not (ax + aw <= bx or bx + bw <= ax or ay + ah <= by or by + bh <= ay)
 
 # ----------------------------
-# INPUT / LAUNCH
+# PLAYER STATE
 # ----------------------------
-last_move = time.time()
-last_action = time.time()
+def new_player(x, color, pad, facing):
+    return {
+        "x": float(x),
+        "y": float(GROUND_Y - STAND_H + 1),
+        "vx": 0.0,
+        "vy": 0.0,
+        "color": color,
+        "pad": pad,
+        "hp": MAX_HP,
+        "facing": facing,
+        "on_ground": True,
+        "crouch": False,
+        "block": False,
+        "flash_until": 0.0,
+        "atk_type": None,
+        "atk_phase": None,
+        "atk_until": 0.0,
+        "atk_cooldown_until": 0.0,
+        "atk_has_hit": False,
+    }
 
-def launch_file(filename):
-    path = os.path.join(GAMES_DIR, filename)
-    if not os.path.isfile(path):
-        print("Missing file:", path, flush=True)
+def reset_round(now):
+    p1 = new_player(32, P1_COLOR, pad1, +1)
+    p2 = new_player(96, P2_COLOR, pad2, -1)
+    return {
+        "p1": p1,
+        "p2": p2,
+        "round_over": False,
+        "winner": 0,
+        "over_until": 0.0,
+        "last_reset_try": 0.0,
+        "last_t": now
+    }
+
+game = reset_round(time.time())
+
+# ----------------------------
+# ATTACK LOGIC
+# ----------------------------
+def get_body_rect(p):
+    w = STAND_W
+    h = CROUCH_H if p["crouch"] else STAND_H
+    return int(p["x"]), int(p["y"] + (STAND_H - h)), w, h
+
+def start_light(p, now):
+    p["atk_type"] = "light"
+    p["atk_phase"] = "active"
+    p["atk_until"] = now + LIGHT_ACTIVE
+    p["atk_cooldown_until"] = now + LIGHT_COOLDOWN
+    p["atk_has_hit"] = False
+
+def start_heavy(p, now):
+    p["atk_type"] = "heavy"
+    p["atk_phase"] = "windup"
+    p["atk_until"] = now + HEAVY_WINDUP
+    p["atk_cooldown_until"] = now + HEAVY_COOLDOWN
+    p["atk_has_hit"] = False
+
+def attack_hitbox(p):
+    bx, by, bw, bh = get_body_rect(p)
+    rng = LIGHT_RANGE if p["atk_type"] == "light" else HEAVY_RANGE
+    hb_w = rng
+    hb_h = bh - 2
+    hb_y = by + 1
+
+    if p["facing"] > 0:
+        hb_x = bx + bw
+    else:
+        hb_x = bx - hb_w
+    return hb_x, hb_y, hb_w, hb_h
+
+def apply_damage(attacker, defender, dmg, now):
+    if defender["block"]:
+        ax, _, aw, _ = get_body_rect(attacker)
+        dx, _, dw, _ = get_body_rect(defender)
+        attacker_left_of_def = (ax + aw/2) < (dx + dw/2)
+        needed_facing = -1 if attacker_left_of_def else +1
+        if defender["facing"] == needed_facing:
+            dmg = max(1, int(math.ceil(dmg * BLOCK_MULT)))
+
+    defender["hp"] = max(0, defender["hp"] - dmg)
+    defender["flash_until"] = now + HIT_FLASH_TIME
+
+def update_attack(p, other, now):
+    if p["atk_type"] is None:
         return
 
-    matrix.Clear()
-    pygame.quit()
+    if now >= p["atk_until"]:
+        if p["atk_type"] == "heavy" and p["atk_phase"] == "windup":
+            p["atk_phase"] = "active"
+            p["atk_until"] = now + HEAVY_ACTIVE
+            p["atk_has_hit"] = False
+        else:
+            p["atk_type"] = None
+            p["atk_phase"] = None
+            p["atk_until"] = 0.0
+            p["atk_has_hit"] = False
+            return
 
-    # Replace THIS process with the game
-    os.execvp("python3", ["python3", path])
+    if p["atk_phase"] == "active" and not p["atk_has_hit"]:
+        hx, hy, hw, hh = attack_hitbox(p)
+        ox, oy, ow, oh = get_body_rect(other)
+        if rects_overlap(hx, hy, hw, hh, ox, oy, ow, oh):
+            dmg = LIGHT_DMG if p["atk_type"] == "light" else HEAVY_DMG
+            apply_damage(p, other, dmg, now)
+            p["atk_has_hit"] = True
+
+# ----------------------------
+# INPUT + PHYSICS
+# ----------------------------
+def read_axis(pad, axis):
+    v = pad.get_axis(axis)
+    if abs(v) < DEADZONE:
+        return 0.0
+    return v
+
+def update_player(p, other, dt, now):
+    if p["hp"] <= 0:
+        return
+
+    p["facing"] = +1 if p["x"] < other["x"] else -1
+
+    ly = read_axis(p["pad"], AXIS_Y)
+    p["crouch"] = (ly > 0.5)
+
+    p["block"] = bool(p["pad"].get_button(Y_BTN))
+
+    lx = read_axis(p["pad"], AXIS_X)
+    speed = MOVE_SPEED
+    if p["crouch"]:
+        speed *= 0.55
+    if p["block"]:
+        speed *= 0.65
+
+    p["vx"] = lx * speed
+
+    if p["pad"].get_button(X_BTN) and p["on_ground"] and (not p["crouch"]):
+        p["vy"] = JUMP_VEL
+        p["on_ground"] = False
+
+    if p["atk_type"] is None and now >= p["atk_cooldown_until"] and (not p["block"]):
+        if p["pad"].get_button(A_BTN):
+            start_light(p, now)
+        elif p["pad"].get_button(B_BTN):
+            start_heavy(p, now)
+
+    p["x"] += p["vx"] * dt
+    p["vy"] += GRAVITY * dt
+    p["y"] += p["vy"] * dt
+
+    body_h = CROUCH_H if p["crouch"] else STAND_H
+    ground_top = GROUND_Y - body_h + 1
+    if p["y"] >= ground_top:
+        p["y"] = ground_top
+        p["vy"] = 0.0
+        p["on_ground"] = True
+    else:
+        p["on_ground"] = False
+
+    p["x"] = clamp(p["x"], 0, W - STAND_W)
+
+    update_attack(p, other, now)
+
+def compute_winner(p1, p2):
+    if p1["hp"] <= 0 and p2["hp"] <= 0:
+        return 0
+    if p2["hp"] <= 0:
+        return 1
+    if p1["hp"] <= 0:
+        return 2
+    return 0
+
+# ----------------------------
+# DRAW
+# ----------------------------
+def draw_hp_bars(cv, p1, p2):
+    y0 = PLAY_H
+    h = HP_BAR_H
+
+    fill_rect(cv, 0, y0, W, h, Color(5, 5, 5))
+
+    p1_w = int((p1["hp"] / MAX_HP) * 64)
+    fill_rect(cv, 0, y0, p1_w, h, Color(0, 180, 0))
+    fill_rect(cv, 0, y0, 64, 1, Color(20, 20, 20))
+    fill_rect(cv, 0, y0 + h - 1, 64, 1, Color(20, 20, 20))
+
+    p2_w = int((p2["hp"] / MAX_HP) * 64)
+    fill_rect(cv, 64 + (64 - p2_w), y0, p2_w, h, Color(0, 0, 180))
+    fill_rect(cv, 64, y0, 64, 1, Color(20, 20, 20))
+    fill_rect(cv, 64, y0 + h - 1, 64, 1, Color(20, 20, 20))
+
+    fill_rect(cv, 63, y0, 2, h, Color(40, 40, 40))
+
+def draw_player(cv, p):
+    x, y, w, h = get_body_rect(p)
+
+    col = p["color"]
+    if time.time() < p["flash_until"]:
+        col = HIT_FLASH
+
+    fill_rect(cv, x, y, w, h, col)
+
+    if p["block"] and p["hp"] > 0:
+        ox = x - 1; oy = y - 1
+        ow = w + 2; oh = h + 2
+        fill_rect(cv, ox, oy, ow, 1, BLOCK_COLOR)
+        fill_rect(cv, ox, oy + oh - 1, ow, 1, BLOCK_COLOR)
+        fill_rect(cv, ox, oy, 1, oh, BLOCK_COLOR)
+        fill_rect(cv, ox + ow - 1, oy, 1, oh, BLOCK_COLOR)
+
+def draw_attack(cv, p):
+    if p["atk_type"] is None or p["atk_phase"] != "active":
+        return
+    hx, hy, hw, hh = attack_hitbox(p)
+    c = Color(255, 120, 0) if p["atk_type"] == "heavy" else Color(255, 255, 255)
+    fill_rect(cv, hx, hy, hw, 2, c)
+
+def draw_result_overlay(cv, winner, now):
+    pulse = (math.sin(now * 6) + 1) / 2
+    glow = int(80 + 175 * pulse)
+
+    if winner == 1:
+        col = Color(0, glow, 0)
+    elif winner == 2:
+        col = Color(0, 0, glow)
+    else:
+        col = Color(glow, glow, 0)
+
+    fill_rect(cv, 0, 22, W, 20, Color(0, 0, 0))
+    for x in range(0, W, 4):
+        fill_rect(cv, x, 22, 2, 20, col)
+    fill_rect(cv, 0, 22, W, 1, col)
+    fill_rect(cv, 0, 41, W, 1, col)
 
 # ----------------------------
 # MAIN LOOP
 # ----------------------------
+now = time.time()
+last_both_b = 0.0
+exit_mgr = ExitOnBack([pad1, pad2], back_btn=BACK_BTN, quit_only=False)
+
 while True:
     pygame.event.pump()
     now = time.time()
 
-    # keep idx valid if list changed
-    if games:
-        idx = max(0, min(idx, len(games) - 1))
-    else:
-        idx = 0
+    if exit_mgr.should_exit():
+        matrix.Clear()
+        exit_mgr.handle()
 
-    draw_menu(canvas, games, idx if games else 0, now)
+    # dt
+    dt = now - game["last_t"]
+    game["last_t"] = now
+    if dt < 0:
+        dt = 0
+    if dt > 0.05:
+        dt = 0.05
+
+    p1 = game["p1"]
+    p2 = game["p2"]
+
+    if not game["round_over"]:
+        update_player(p1, p2, dt, now)
+        update_player(p2, p1, dt, now)
+
+        w = compute_winner(p1, p2)
+        if w != 0:
+            game["round_over"] = True
+            game["winner"] = w
+            game["over_until"] = now + 2.5
+
+    # DRAW
+    canvas.Clear()
+    draw_floor(canvas)
+    draw_attack(canvas, p1)
+    draw_attack(canvas, p2)
+    draw_player(canvas, p1)
+    draw_player(canvas, p2)
+    draw_hp_bars(canvas, p1, p2)
+
+    if game["round_over"]:
+        draw_result_overlay(canvas, game["winner"], now)
+        if now >= game["over_until"]:
+            game = reset_round(now)
+
     canvas = matrix.SwapOnVSync(canvas)
 
-    # exit
-    if js.get_button(BACK_BTN):
-        matrix.Clear()
-        pygame.quit()
-        raise SystemExit(0)
-
-    # refresh (B)
-    if js.get_button(B_BTN) and (now - last_action) > LAUNCH_DEBOUNCE:
-        games = load_games()
-        idx = 0
-        last_action = now
-
-    # launch (A)
-    if js.get_button(A_BTN) and games and (now - last_action) > LAUNCH_DEBOUNCE:
-        idx = max(0, min(idx, len(games) - 1))
-        print("Launching:", games[idx], flush=True)
-        last_action = now
-        launch_file(games[idx])
-
-    # movement (carousel left/right)
-    if now - last_move > MOVE_DELAY and games:
-        lx = js.get_axis(0)
-        dx = 0
-        if lx > DEADZONE:
-            dx = 1
-        elif lx < -DEADZONE:
-            dx = -1
-
-        if dx != 0:
-            idx = (idx + dx) % len(games)
-            last_move = now

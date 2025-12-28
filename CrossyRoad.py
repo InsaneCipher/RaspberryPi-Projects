@@ -4,6 +4,7 @@ import math
 import random
 from rgbmatrix import RGBMatrix, RGBMatrixOptions
 from rgbmatrix.graphics import Color
+from Utils.menu_utils import ExitOnBack
 
 # -------------------------------------------------
 # 1v1 CROSSY-ADVANCE (DUAL PANEL)
@@ -524,16 +525,16 @@ def draw_player_panel(cv, player):
 # -------------------------------------------------
 # MAIN LOOP
 # -------------------------------------------------
+exit_mgr = ExitOnBack([controllerA, controllerB], back_btn=BACK_BTN, quit_only=False)
 
 while True:
     pygame.event.pump()
     now = time.time()
 
     # EXIT
-    if controllerA.get_button(BACK_BTN) or controllerB.get_button(BACK_BTN):
+    if exit_mgr.should_exit():
         matrix.Clear()
-        pygame.quit()
-        raise SystemExit(0)
+        exit_mgr.handle()
 
     # RESET (B)
     if (controllerA.get_button(B_BTN) or controllerB.get_button(B_BTN)) and now - game["last_action"] > 0.5:

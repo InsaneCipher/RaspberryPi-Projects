@@ -4,6 +4,7 @@ import math
 from rgbmatrix import RGBMatrix, RGBMatrixOptions
 from rgbmatrix.graphics import Color
 from led_digits import DIGITS_8x8
+from Utils.menu_utils import ExitOnBack
 
 # -------------------------------------------------
 # 1v1 LANE SHOOTER – GAME MECHANICS
@@ -293,16 +294,16 @@ def check_game_over(now):
 # -------------------------------------------------
 # MAIN LOOP
 # -------------------------------------------------
+exit_mgr = ExitOnBack([controllerA, controllerB], back_btn=BACK_BTN, quit_only=False)
 
 while True:
     pygame.event.pump()
     now = time.time()
 
     # EXIT
-    if controllerA.get_button(BACK_BTN) or controllerB.get_button(BACK_BTN):
+    if exit_mgr.should_exit():
         matrix.Clear()
-        pygame.quit()
-        exit(0)
+        exit_mgr.handle()
 
     # RESET (B)
     if (controllerA.get_button(B_BTN) or controllerB.get_button(B_BTN)) and now - game["last_action"] > 0.5:

@@ -4,6 +4,7 @@ import math
 from rgbmatrix import RGBMatrix, RGBMatrixOptions
 from rgbmatrix.graphics import Color
 from Utils.led_digits import DIGITS_8x8, clamp_digit
+from Utils.menu_utils import ExitOnBack
 
 # -------------------------------------------------
 # INITIALIZATION
@@ -231,16 +232,16 @@ start_time = time.time()
 # -------------------------------------------------
 # MAIN LOOP
 # -------------------------------------------------
+exit_mgr = ExitOnBack([controllerA, controllerB], back_btn=BACK, quit_only=False)
 
 while True:
     pygame.event.pump()
     now = time.time()
 
     # EXIT
-    if controllerA.get_button(BACK) or controllerB.get_button(BACK):
+    if exit_mgr.should_exit():
         matrix.Clear()
-        pygame.quit()
-        exit(0)
+        exit_mgr.handle()
 
     # RESET ROUND (keeps score)
     if (controllerA.get_button(B) or controllerB.get_button(B)) and now - game["last_action"] > 0.5:
