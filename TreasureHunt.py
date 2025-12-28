@@ -4,7 +4,7 @@ import math
 import random
 from rgbmatrix import RGBMatrix, RGBMatrixOptions
 from rgbmatrix.graphics import Color
-from led_digits import DIGITS_8x8, clamp_digit
+from Utils.led_digits import DIGITS_8x8, clamp_digit
 
 # scp /Users/Insan/PycharmProjects/RaspberryPi-Projects/active.py rpi-kristof@192.168.0.200:~/teszt.py
 # -------------------------------------------------

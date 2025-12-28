@@ -3,7 +3,7 @@ import time
 import math
 from rgbmatrix import RGBMatrix, RGBMatrixOptions
 from rgbmatrix.graphics import Color
-from led_digits import DIGITS_8x8, clamp_digit
+from Utils.led_digits import DIGITS_8x8, clamp_digit
 
 # -------------------------------------------------
 # INITIALIZATION

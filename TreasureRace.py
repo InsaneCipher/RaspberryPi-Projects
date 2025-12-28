@@ -1,3 +1,10 @@
+import pygame
+import time
+import random
+from rgbmatrix import RGBMatrix, RGBMatrixOptions
+from rgbmatrix.graphics import Color
+from Utils.led_digits import DIGITS_8x8
+
 # -------------------------------------------------
 # REACTION GEM DUEL – GAME MECHANICS
 #
@@ -21,14 +28,6 @@
 #   • B          – Reset game
 #   • Back       – Quit
 # -------------------------------------------------
-
-import pygame
-import time
-import math
-import random
-from rgbmatrix import RGBMatrix, RGBMatrixOptions
-from rgbmatrix.graphics import Color
-from led_digits import DIGITS_8x8, clamp_digit
 
 # -------------------------------------------------
 # INITIALIZATION
