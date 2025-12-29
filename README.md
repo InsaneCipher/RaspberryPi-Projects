@@ -40,6 +40,8 @@ Controls
 
 Notes
 
+![screenshot](images/panel.jpg)
+
 All games are designed for very low resolution and prioritize readability and performance.
 
 Code is written to be modular so games can share input, menu, and rendering logic.
