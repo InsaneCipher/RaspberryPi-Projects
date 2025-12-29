@@ -40,7 +40,7 @@ Controls
 
 Notes
 
-![screenshot](images/panel.jpg)
+![screenshot](Images/panel.jpg)
 
 All games are designed for very low resolution and prioritize readability and performance.
 
