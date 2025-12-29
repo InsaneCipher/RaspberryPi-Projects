@@ -40,8 +40,6 @@ Controls
 
 Notes
 
-![screenshot](Images/panel.jpg)
-
 All games are designed for very low resolution and prioritize readability and performance.
 
 Code is written to be modular so games can share input, menu, and rendering logic.
@@ -52,3 +50,6 @@ License
 
 Personal / educational use.
 Feel free to fork, modify, and experiment.
+
+
+![screenshot](Images/panel.jpg)
