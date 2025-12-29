@@ -1,18 +1,53 @@
-import pygame
-import os
 import time
 import math
+import random
+import pygame
 from rgbmatrix import RGBMatrix, RGBMatrixOptions
 from rgbmatrix.graphics import Color
 from Utils.menu_utils import ExitOnBack
 
+
 # -------------------------------------------------
-# 1v1 FIGHT GAME (DUAL PANEL AS ONE ARENA, 128x64)
-# (your existing header unchanged)
+# CO-OP SPACE INVADERS (128x64)
+#
+# Improvements:
+# - Each player has 3 lives (shared death events reduce lives).
+# - 4 enemy types:
+#   RED:    basic, 1 HP
+#   BLUE:   tank, 2 HP
+#   GREEN:  double damage bullets
+#   YELLOW: fires faster
+# - Score increases from:
+#   - killing enemies (by type)
+#   - completing a wave/round (round bonus scales by round)
+#
+# Players:
+# - Move: left stick X
+# - Shoot: A
+# - BACK on either controller exits
+#
+# Respawn:
+# - If one dies while other alive: respawn after 5s (if lives remain)
+# - If both die in same tick: both lose a life; game continues if lives remain
+#   otherwise GAME OVER.
 # -------------------------------------------------
 
 # ----------------------------
-# INIT (pygame + controllers)
+# MATRIX CONFIG
+# ----------------------------
+options = RGBMatrixOptions()
+options.hardware_mapping = "adafruit-hat"
+options.rows = 64
+options.cols = 64
+options.chain_length = 2
+options.brightness = 50
+options.gpio_slowdown = 4
+
+matrix = RGBMatrix(options=options)
+canvas = matrix.CreateFrameCanvas()
+
+# ----------------------------
+# PYGAME / CONTROLLERS
 # ----------------------------
 pygame.init()
 pygame.joystick.init()
@@ -27,342 +62,580 @@ pad1.init()
 pad2.init()
 
 # ----------------------------
-# INIT (matrix)
-# ----------------------------
-options = RGBMatrixOptions()
-options.hardware_mapping = "adafruit-hat"
-options.rows = 64
-options.cols = 64
-options.chain_length = 2
-options.brightness = 50
-options.gpio_slowdown = 4
-
-matrix = RGBMatrix(options=options)
-canvas = matrix.CreateFrameCanvas()
-
-# ----------------------------
 # CONSTANTS
 # ----------------------------
-W = 128
-H = 64
+W, H = 128, 64
 
-HP_BAR_H = 6
-PLAY_H = H - HP_BAR_H
-GROUND_Y = PLAY_H - 1
+UI_H = 12
+PLAY_Y0 = UI_H
+PLAY_H = H - UI_H
 
-# buttons (Xbox-style mapping commonly used by pygame)
 A_BTN = 0
-B_BTN = 1
-X_BTN = 2
-Y_BTN = 3
 BACK_BTN = 6
 
 AXIS_X = 0
-AXIS_Y = 1
 DEADZONE = 0.35
 
-# player visuals
-P1_COLOR = Color(0, 255, 0)    # green
-P2_COLOR = Color(0, 0, 255)    # blue
-HIT_FLASH = Color(255, 0, 0)   # red
-BLOCK_COLOR = Color(255, 255, 0)
+# UI colors
+UI_TEXT = Color(255, 0, 255)     # magenta
+SEP = Color(30, 30, 30)
 
-BG = Color(0, 0, 0)
-FLOOR = Color(40, 40, 40)
+# players
+P1_COLOR = Color(0, 255, 0)
+P2_COLOR = Color(0, 180, 255)
+P1_BULLET = Color(255, 255, 0)
+P2_BULLET = Color(255, 165, 0)
 
-# physics
-GRAVITY = 80.0          # px/s^2
-MOVE_SPEED = 45.0       # px/s
-JUMP_VEL = -42.0        # px/s
+# enemy type colors
+E_RED = Color(255, 0, 0)
+E_BLUE = Color(0, 120, 255)
+E_GREEN = Color(0, 255, 0)
+E_YELLOW = Color(255, 255, 0)
+ENEMY_HIT_FLASH_TIME = 0.10
+ENEMY_HIT_FLASH_COLOR = Color(255, 255, 255)  # or Color(255,0,255) for magenta flash
 
-# player body sizes
-STAND_W = 8
-STAND_H = 14
-CROUCH_H = 9
+ENEMY_BULLET = Color(255, 60, 60)
 
-# game
-MAX_HP = 10
-HIT_FLASH_TIME = 0.18
+SHIP_W, SHIP_H = 7, 3
+SHIP_Y = H - 4
 
-# attacks
-LIGHT_DMG = 1
-LIGHT_RANGE = 12
-LIGHT_ACTIVE = 0.12
-LIGHT_COOLDOWN = 0.28
-HEAVY_DMG = 2
-HEAVY_RANGE = 16
-HEAVY_WINDUP = 0.14
-HEAVY_ACTIVE = 0.14
-HEAVY_COOLDOWN = 0.55
-BLOCK_MULT = 0.25  # takes 25% damage while blocking (rounded up to at least 1 if >0)
+BULLET_W, BULLET_H = 1, 3
+BULLET_SPEED = 80.0
+FIRE_COOLDOWN = 0.2
+MAX_PLAYER_BULLETS = 3
+
+ENEMY_CELL = 6
+ENEMY_W, ENEMY_H = 4, 3
+ENEMY_SPEED_X = 18.0
+ENEMY_STEP_DOWN = 4
+ENEMY_EDGE_PAD = 2
+
+# base enemy firing
+ENEMY_FIRE_CHANCE = 0.015       # baseline; modified by enemy type
+ENEMY_BULLET_SPEED = 25.0
+
+# player life/damage
+START_LIVES = 3
+PLAYER_HIT_DAMAGE = 1
+RESPAWN_TIME = 5.0
+SPAWN_INVULN = 1.0
+BOTH_DEAD_SCREEN_TIME = 1.5
+
+# scoring
+SCORE_KILL_RED = 10
+SCORE_KILL_BLUE = 20
+SCORE_KILL_GREEN = 15
+SCORE_KILL_YELLOW = 15
+ROUND_BONUS_BASE = 50           # + round_idx*something
+ROUND_BONUS_STEP = 25
+
+TICK_DT_CAP = 0.05
 
 # ----------------------------
-# HELPERS
+# 3x5 DIGIT FONT FOR SCORE
 # ----------------------------
-def clamp(v, lo, hi):
-    return lo if v < lo else hi if v > hi else v
+DIG3x5 = {
+    "0": ["111","101","101","101","111"],
+    "1": ["010","110","010","010","111"],
+    "2": ["111","001","111","100","111"],
+    "3": ["111","001","111","001","111"],
+    "4": ["101","101","111","001","001"],
+    "5": ["111","100","111","001","111"],
+    "6": ["111","100","111","101","111"],
+    "7": ["111","001","001","010","010"],
+    "8": ["111","101","111","101","111"],
+    "9": ["111","101","111","001","111"],
+}
+
+def set_px(cv, x, y, c):
+    if 0 <= x < W and 0 <= y < H:
+        cv.SetPixel(x, y, c.red, c.green, c.blue)
 
 def fill_rect(cv, x0, y0, w, h, c):
-    x1 = x0 + w
-    y1 = y0 + h
+    x1, y1 = x0 + w, y0 + h
     if x1 <= 0 or y1 <= 0 or x0 >= W or y0 >= H:
         return
     x0 = max(0, x0); y0 = max(0, y0)
     x1 = min(W, x1); y1 = min(H, y1)
-    for y in range(y0, y1):
-        for x in range(x0, x1):
-            cv.SetPixel(x, y, c.red, c.green, c.blue)
+    for yy in range(y0, y1):
+        for xx in range(x0, x1):
+            cv.SetPixel(xx, yy, c.red, c.green, c.blue)
 
-def draw_floor(cv):
-    y = PLAY_H - 1
+def draw_digit3x5(cv, x, y, ch, color, scale=2):
+    glyph = DIG3x5.get(ch)
+    if not glyph:
+        return
+    for gy in range(5):
+        row = glyph[gy]
+        for gx in range(3):
+            if row[gx] == "1":
+                for sy in range(scale):
+                    for sx in range(scale):
+                        set_px(cv, x + gx*scale + sx, y + gy*scale + sy, color)
+
+def draw_score(cv, score):
+    # score centered
+    s = str(max(0, int(score)))
+    scale = 2
+    digit_w = 3*scale
+    gap = 1*scale
+    total_w = len(s)*digit_w + (len(s)-1)*gap
+    x0 = (W - total_w) // 2
+    y0 = 1
+    for i, ch in enumerate(s):
+        draw_digit3x5(cv, x0 + i*(digit_w+gap), y0, ch, UI_TEXT, scale=scale)
+
     for x in range(W):
-        cv.SetPixel(x, y, FLOOR.red, FLOOR.green, FLOOR.blue)
+        set_px(cv, x, UI_H - 1, SEP)
 
 def rects_overlap(ax, ay, aw, ah, bx, by, bw, bh):
     return not (ax + aw <= bx or bx + bw <= ax or ay + ah <= by or by + bh <= ay)
 
 # ----------------------------
+# WAVES (PATTERNS)
+# 1 = spawn enemy (type assigned by round)
+# ----------------------------
+WAVES = [
+    # 0) Checker stripes
+    [
+        [0,1,0,1,0,1,0,1,0,1],
+        [1,0,1,0,1,0,1,0,1,0],
+        [0,1,0,1,0,1,0,1,0,1],
+    ],
+
+    # 1) Hollow box + inner bars
+    [
+        [1,1,1,1,1,1,1,1,1,1],
+        [1,0,0,0,0,0,0,0,0,1],
+        [1,0,1,1,1,1,1,1,0,1],
+        [1,0,0,0,0,0,0,0,0,1],
+        [1,1,1,1,1,1,1,1,1,1],
+    ],
+
+    # 2) Diamond-ish cluster
+    [
+        [0,0,0,1,1,1,0,0,0,0],
+        [0,0,1,1,1,1,1,0,0,0],
+        [0,1,1,0,1,1,0,1,1,0],
+        [1,1,0,0,1,1,0,0,1,1],
+    ],
+
+    # 3) Solid wall
+    [
+        [1,1,1,1,1,1,1,1,1,1],
+        [1,1,1,1,1,1,1,1,1,1],
+        [1,1,1,1,1,1,1,1,1,1],
+    ],
+
+    # 4) Two thick bands
+    [
+        [1,1,1,0,0,0,0,1,1,1],
+        [1,1,1,0,0,0,0,1,1,1],
+        [1,1,1,0,0,0,0,1,1,1],
+    ],
+
+    # 5) “Castle” pillars
+    [
+        [1,0,1,0,1,0,1,0,1,0],
+        [1,0,1,1,1,1,1,1,1,0],
+        [1,0,1,0,1,0,1,0,1,0],
+        [1,0,1,1,1,1,1,1,1,0],
+    ],
+
+    # 6) X pattern
+    [
+        [1,0,0,0,0,0,0,0,0,1],
+        [0,1,0,0,0,0,0,0,1,0],
+        [0,0,1,0,0,0,0,1,0,0],
+        [0,0,0,1,0,0,1,0,0,0],
+        [0,0,0,0,1,1,0,0,0,0],
+    ],
+
+    # 7) Wedges toward center
+    [
+        [1,0,0,0,0,0,0,0,0,1],
+        [1,1,0,0,0,0,0,0,1,1],
+        [1,1,1,0,0,0,0,1,1,1],
+        [0,1,1,1,0,0,1,1,1,0],
+    ],
+
+    # 8) “Snake” path rows
+    [
+        [1,1,1,1,0,0,0,0,0,0],
+        [0,0,0,1,1,1,1,0,0,0],
+        [0,0,0,0,0,1,1,1,1,0],
+        [0,1,1,1,1,0,0,0,0,0],
+    ],
+
+    # 9) Sparse “ambush”
+    [
+        [0,0,1,0,0,0,0,1,0,0],
+        [0,1,0,0,1,0,0,0,1,0],
+        [1,0,0,0,0,1,0,0,0,1],
+        [0,1,0,1,0,0,1,0,1,0],
+    ],
+]
+
+
+# ----------------------------
+# ENEMY TYPES
+# ----------------------------
+# type: (color, hp, fire_mult, dmg_mult, score_on_kill)
+ENEMY_TYPES = {
+    "red":    (E_RED,    1, 1.0, 1, SCORE_KILL_RED),
+    "blue":   (E_BLUE,   2, 1.0, 1, SCORE_KILL_BLUE),
+    "green":  (E_GREEN,  4, 1.0, 2, SCORE_KILL_GREEN),   # double damage
+    "yellow": (E_YELLOW, 2, 1.0, 2, SCORE_KILL_YELLOW),  # fires faster
+}
+
+def pick_enemy_type_for_cell(round_idx, r, c):
+    """
+    Deterministic-ish mix that changes with round.
+    Early rounds: mostly red. Later: more variety.
+    """
+    # weights change with round
+    t = round_idx
+    w_red = max(20, 80 - t*6)
+    w_blue = min(35, 5 + t*3)
+    w_green = min(25, 5 + t*2)
+    w_yellow = min(25, 5 + t*2)
+
+    # slight pattern variation by row/col
+    bias = (r*7 + c*13 + t*11) % 100
+    weights = [
+        ("red", w_red),
+        ("blue", w_blue + (5 if bias < 20 else 0)),
+        ("green", w_green + (5 if 20 <= bias < 40 else 0)),
+        ("yellow", w_yellow + (5 if 40 <= bias < 60 else 0)),
+    ]
+    total = sum(w for _, w in weights)
+    roll = (r*31 + c*17 + t*53 + bias) % total
+    acc = 0
+    for name, w in weights:
+        acc += w
+        if roll < acc:
+            return name
+    return "red"
+
+def spawn_wave(round_idx):
+    wave = WAVES[round_idx % len(WAVES)]
+    rows = len(wave)
+    cols = len(wave[0])
+
+    total_w = cols * ENEMY_CELL
+    start_x = (W - total_w) // 2
+    start_y = PLAY_Y0 + 2
+
+    enemies = []
+    for r in range(rows):
+        for c in range(cols):
+            if wave[r][c] == 1:
+                et = pick_enemy_type_for_cell(round_idx, r, c)
+                color, hp, fire_mult, dmg_mult, score_kill = ENEMY_TYPES[et]
+                enemies.append({
+                    "x": float(start_x + c*ENEMY_CELL),
+                    "y": float(start_y + r*ENEMY_CELL),
+                    "type": et,
+                    "hp": hp,
+                    "color": color,
+                    "fire_mult": fire_mult,
+                    "dmg_mult": dmg_mult,
+                    "score_kill": score_kill,
+                    "alive": True,
+                    "flash_until": 0.0,
+                })
+    return enemies
+
+def enemies_bounds(enemies):
+    xs = [e["x"] for e in enemies if e["alive"]]
+    ys = [e["y"] for e in enemies if e["alive"]]
+    if not xs:
+        return None
+    minx = min(xs)
+    maxx = max(xs) + ENEMY_W
+    miny = min(ys)
+    maxy = max(ys) + ENEMY_H
+    return minx, miny, maxx, maxy
+
+# ----------------------------
 # PLAYER STATE
 # ----------------------------
-def new_player(x, color, pad, facing):
+def new_player(x, color, bullet_color, pad):
     return {
         "x": float(x),
-        "y": float(GROUND_Y - STAND_H + 1),
-        "vx": 0.0,
-        "vy": 0.0,
+        "y": float(SHIP_Y),
         "color": color,
+        "bcolor": bullet_color,
         "pad": pad,
-        "hp": MAX_HP,
-        "facing": facing,
-        "on_ground": True,
-        "crouch": False,
-        "block": False,
-        "flash_until": 0.0,
-        "atk_type": None,
-        "atk_phase": None,
-        "atk_until": 0.0,
-        "atk_cooldown_until": 0.0,
-        "atk_has_hit": False,
+
+        "lives": START_LIVES,
+        "alive": True,
+
+        "respawn_until": 0.0,
+        "invuln_until": 0.0,
+        "cooldown_until": 0.0,
+
+        "bullets": [],
+        "took_hit_this_tick": False,
     }
 
-def reset_round(now):
-    p1 = new_player(32, P1_COLOR, pad1, +1)
-    p2 = new_player(96, P2_COLOR, pad2, -1)
+def reset_game(now):
     return {
-        "p1": p1,
-        "p2": p2,
-        "round_over": False,
-        "winner": 0,
-        "over_until": 0.0,
-        "last_reset_try": 0.0,
-        "last_t": now
+        "score": 0,
+        "round_idx": 0,
+        "enemies": spawn_wave(0),
+        "enemy_dir": 1,
+        "enemy_bullets": [],
+
+        "p1": new_player(32, P1_COLOR, P1_BULLET, pad1),
+        "p2": new_player(96, P2_COLOR, P2_BULLET, pad2),
+
+        "game_over": False,
+        "game_over_until": 0.0,
+        "last_t": now,
     }
 
-game = reset_round(time.time())
+game = reset_game(time.time())
 
 # ----------------------------
-# ATTACK LOGIC
+# LOGIC
 # ----------------------------
-def get_body_rect(p):
-    w = STAND_W
-    h = CROUCH_H if p["crouch"] else STAND_H
-    return int(p["x"]), int(p["y"] + (STAND_H - h)), w, h
+def move_player(p, dt):
+    lx = p["pad"].get_axis(AXIS_X)
+    if abs(lx) < DEADZONE:
+        lx = 0.0
+    speed = 60.0
+    p["x"] += lx * speed * dt
+    p["x"] = max(0, min(W - SHIP_W, p["x"]))
 
-def start_light(p, now):
-    p["atk_type"] = "light"
-    p["atk_phase"] = "active"
-    p["atk_until"] = now + LIGHT_ACTIVE
-    p["atk_cooldown_until"] = now + LIGHT_COOLDOWN
-    p["atk_has_hit"] = False
-
-def start_heavy(p, now):
-    p["atk_type"] = "heavy"
-    p["atk_phase"] = "windup"
-    p["atk_until"] = now + HEAVY_WINDUP
-    p["atk_cooldown_until"] = now + HEAVY_COOLDOWN
-    p["atk_has_hit"] = False
-
-def attack_hitbox(p):
-    bx, by, bw, bh = get_body_rect(p)
-    rng = LIGHT_RANGE if p["atk_type"] == "light" else HEAVY_RANGE
-    hb_w = rng
-    hb_h = bh - 2
-    hb_y = by + 1
-
-    if p["facing"] > 0:
-        hb_x = bx + bw
-    else:
-        hb_x = bx - hb_w
-    return hb_x, hb_y, hb_w, hb_h
-
-def apply_damage(attacker, defender, dmg, now):
-    if defender["block"]:
-        ax, _, aw, _ = get_body_rect(attacker)
-        dx, _, dw, _ = get_body_rect(defender)
-        attacker_left_of_def = (ax + aw/2) < (dx + dw/2)
-        needed_facing = -1 if attacker_left_of_def else +1
-        if defender["facing"] == needed_facing:
-            dmg = max(1, int(math.ceil(dmg * BLOCK_MULT)))
-
-    defender["hp"] = max(0, defender["hp"] - dmg)
-    defender["flash_until"] = now + HIT_FLASH_TIME
-
-def update_attack(p, other, now):
-    if p["atk_type"] is None:
+def try_fire(p, now):
+    if not p["alive"]:
         return
-
-    if now >= p["atk_until"]:
-        if p["atk_type"] == "heavy" and p["atk_phase"] == "windup":
-            p["atk_phase"] = "active"
-            p["atk_until"] = now + HEAVY_ACTIVE
-            p["atk_has_hit"] = False
-        else:
-            p["atk_type"] = None
-            p["atk_phase"] = None
-            p["atk_until"] = 0.0
-            p["atk_has_hit"] = False
+    if now < p["cooldown_until"]:
+        return
+    if p["pad"].get_button(A_BTN):
+        if len(p["bullets"]) >= MAX_PLAYER_BULLETS:
             return
+        bx = int(p["x"] + SHIP_W // 2)
+        by = int(p["y"] - 1)
+        p["bullets"].append({"x": float(bx), "y": float(by)})
+        p["cooldown_until"] = now + FIRE_COOLDOWN
 
-    if p["atk_phase"] == "active" and not p["atk_has_hit"]:
-        hx, hy, hw, hh = attack_hitbox(p)
-        ox, oy, ow, oh = get_body_rect(other)
-        if rects_overlap(hx, hy, hw, hh, ox, oy, ow, oh):
-            dmg = LIGHT_DMG if p["atk_type"] == "light" else HEAVY_DMG
-            apply_damage(p, other, dmg, now)
-            p["atk_has_hit"] = True
+def update_player_bullets(p, enemies, dt):
+    if not p["bullets"]:
+        return 0
 
-# ----------------------------
-# INPUT + PHYSICS
-# ----------------------------
-def read_axis(pad, axis):
-    v = pad.get_axis(axis)
-    if abs(v) < DEADZONE:
-        return 0.0
-    return v
+    gained = 0
+    alive_bullets = []
 
-def update_player(p, other, dt, now):
-    if p["hp"] <= 0:
+    for b in p["bullets"]:
+        b["y"] -= BULLET_SPEED * dt
+        if b["y"] < PLAY_Y0:
+            continue
+
+        hit_enemy = None
+        for e in enemies:
+            if not e["alive"]:
+                continue
+            if rects_overlap(int(b["x"]), int(b["y"]), BULLET_W, BULLET_H,
+                             int(e["x"]), int(e["y"]), ENEMY_W, ENEMY_H):
+                hit_enemy = e
+                break
+
+        if hit_enemy:
+            hit_enemy["flash_until"] = time.time() + ENEMY_HIT_FLASH_TIME
+            hit_enemy["hp"] -= 1
+            if hit_enemy["hp"] <= 0:
+                hit_enemy["alive"] = False
+                gained += hit_enemy["score_kill"]
+        else:
+            alive_bullets.append(b)
+
+    p["bullets"] = alive_bullets
+    return gained
+
+def update_enemies(game, dt):
+    enemies = game["enemies"]
+    b = enemies_bounds(enemies)
+    if b is None:
+        # round complete -> bonus + next round
+        game["round_idx"] += 1
+        game["score"] += ROUND_BONUS_BASE + game["round_idx"] * ROUND_BONUS_STEP
+        game["enemies"] = spawn_wave(game["round_idx"])
+        game["enemy_bullets"].clear()
         return
 
-    p["facing"] = +1 if p["x"] < other["x"] else -1
+    minx, _, maxx, _ = b
+    dx = game["enemy_dir"] * ENEMY_SPEED_X * dt
 
-    ly = read_axis(p["pad"], AXIS_Y)
-    p["crouch"] = (ly > 0.5)
-
-    p["block"] = bool(p["pad"].get_button(Y_BTN))
-
-    lx = read_axis(p["pad"], AXIS_X)
-    speed = MOVE_SPEED
-    if p["crouch"]:
-        speed *= 0.55
-    if p["block"]:
-        speed *= 0.65
-
-    p["vx"] = lx * speed
-
-    if p["pad"].get_button(X_BTN) and p["on_ground"] and (not p["crouch"]):
-        p["vy"] = JUMP_VEL
-        p["on_ground"] = False
-
-    if p["atk_type"] is None and now >= p["atk_cooldown_until"] and (not p["block"]):
-        if p["pad"].get_button(A_BTN):
-            start_light(p, now)
-        elif p["pad"].get_button(B_BTN):
-            start_heavy(p, now)
-
-    p["x"] += p["vx"] * dt
-    p["vy"] += GRAVITY * dt
-    p["y"] += p["vy"] * dt
-
-    body_h = CROUCH_H if p["crouch"] else STAND_H
-    ground_top = GROUND_Y - body_h + 1
-    if p["y"] >= ground_top:
-        p["y"] = ground_top
-        p["vy"] = 0.0
-        p["on_ground"] = True
+    if maxx + dx >= W - ENEMY_EDGE_PAD:
+        game["enemy_dir"] = -1
+        for e in enemies:
+            if e["alive"]:
+                e["y"] += ENEMY_STEP_DOWN
+    elif minx + dx <= ENEMY_EDGE_PAD:
+        game["enemy_dir"] = 1
+        for e in enemies:
+            if e["alive"]:
+                e["y"] += ENEMY_STEP_DOWN
     else:
-        p["on_ground"] = False
+        for e in enemies:
+            if e["alive"]:
+                e["x"] += dx
 
-    p["x"] = clamp(p["x"], 0, W - STAND_W)
+def maybe_enemy_fire(game, dt):
+    living = [e for e in game["enemies"] if e["alive"]]
+    if not living:
+        return
 
-    update_attack(p, other, now)
+    # pick a random enemy; its type modifies fire chance
+    e = random.choice(living)
 
-def compute_winner(p1, p2):
-    if p1["hp"] <= 0 and p2["hp"] <= 0:
-        return 0
-    if p2["hp"] <= 0:
-        return 1
-    if p1["hp"] <= 0:
-        return 2
-    return 0
+    # scale chance by dt & by fire multiplier
+    base = ENEMY_FIRE_CHANCE * e["fire_mult"]
+    chance = 1.0 - pow((1.0 - base), dt * 60.0)
+
+    if random.random() < chance:
+        bx = int(e["x"] + ENEMY_W // 2)
+        by = int(e["y"] + ENEMY_H + 1)
+        game["enemy_bullets"].append({
+            "x": float(bx),
+            "y": float(by),
+            "dmg": int(e["dmg_mult"]),  # green does double damage
+        })
+
+def update_enemy_bullets(game, dt):
+    alive = []
+    for b in game["enemy_bullets"]:
+        b["y"] += ENEMY_BULLET_SPEED * dt
+        if b["y"] >= H:
+            continue
+        alive.append(b)
+    game["enemy_bullets"] = alive
+
+def kill_and_consume_life(p, now):
+    if not p["alive"]:
+        return
+    p["alive"] = False
+    p["bullets"].clear()
+    p["lives"] = max(0, p["lives"] - 1)
+    p["respawn_until"] = now + RESPAWN_TIME
+    p["invuln_until"] = 0.0
+
+def handle_respawn(p, other_alive, now):
+    if p["alive"]:
+        return
+    if p["lives"] <= 0:
+        return
+    if other_alive and now >= p["respawn_until"]:
+        p["alive"] = True
+        p["invuln_until"] = now + SPAWN_INVULN
+        p["bullets"].clear()
+        p["x"] = 32.0 if p["pad"] is pad1 else 96.0
+
+def check_player_hits(game, now):
+    p1 = game["p1"]; p2 = game["p2"]
+    p1["took_hit_this_tick"] = False
+    p2["took_hit_this_tick"] = False
+
+    def player_rect(p):
+        return int(p["x"]), int(p["y"]), SHIP_W, SHIP_H
+
+    # enemy bullets -> players
+    for b in game["enemy_bullets"]:
+        bx, by = int(b["x"]), int(b["y"])
+        bw, bh = 1, 2
+
+        for p in (p1, p2):
+            if not p["alive"]:
+                continue
+            if now < p["invuln_until"]:
+                continue
+            px, py, pw, ph = player_rect(p)
+            if rects_overlap(bx, by, bw, bh, px, py, pw, ph):
+                # apply damage as "hit points" via lives? keep simple: one bullet kill,
+                # but green bullets can "double damage" => still a kill; the difference is:
+                # it removes 2 lives if it hits (brutal), or you can interpret as instant 2 hits.
+                dmg = max(1, int(b.get("dmg", 1)))
+                p["took_hit_this_tick"] = True
+
+                # consume dmg lives at once
+                for _ in range(dmg):
+                    if p["lives"] > 0:
+                        kill_and_consume_life(p, now)
+                    else:
+                        p["alive"] = False
+                        break
+                break
+
+    # invaders reached player line -> treat as hit on both (consume 1 life each)
+    for e in game["enemies"]:
+        if not e["alive"]:
+            continue
+        if int(e["y"]) + ENEMY_H >= SHIP_Y:
+            if p1["alive"]:
+                p1["took_hit_this_tick"] = True
+                kill_and_consume_life(p1, now)
+            if p2["alive"]:
+                p2["took_hit_this_tick"] = True
+                kill_and_consume_life(p2, now)
+            break
+
+def check_game_over(game, now):
+    p1 = game["p1"]; p2 = game["p2"]
+
+    # if both got hit this tick AND both have no lives left -> game over
+    p1_dead = (not p1["alive"]) or (p1["lives"] <= 0)
+    p2_dead = (not p2["alive"]) or (p2["lives"] <= 0)
+
+    if p1_dead and p2_dead and game["game_over"] == False:
+        game["game_over"] = True
+        game["game_over_until"] = now + 3.0
 
 # ----------------------------
 # DRAW
 # ----------------------------
-def draw_hp_bars(cv, p1, p2):
-    y0 = PLAY_H
-    h = HP_BAR_H
-
-    fill_rect(cv, 0, y0, W, h, Color(5, 5, 5))
-
-    p1_w = int((p1["hp"] / MAX_HP) * 64)
-    fill_rect(cv, 0, y0, p1_w, h, Color(0, 180, 0))
-    fill_rect(cv, 0, y0, 64, 1, Color(20, 20, 20))
-    fill_rect(cv, 0, y0 + h - 1, 64, 1, Color(20, 20, 20))
-
-    p2_w = int((p2["hp"] / MAX_HP) * 64)
-    fill_rect(cv, 64 + (64 - p2_w), y0, p2_w, h, Color(0, 0, 180))
-    fill_rect(cv, 64, y0, 64, 1, Color(20, 20, 20))
-    fill_rect(cv, 64, y0 + h - 1, 64, 1, Color(20, 20, 20))
-
-    fill_rect(cv, 63, y0, 2, h, Color(40, 40, 40))
-
-def draw_player(cv, p):
-    x, y, w, h = get_body_rect(p)
-
-    col = p["color"]
-    if time.time() < p["flash_until"]:
-        col = HIT_FLASH
-
-    fill_rect(cv, x, y, w, h, col)
-
-    if p["block"] and p["hp"] > 0:
-        ox = x - 1; oy = y - 1
-        ow = w + 2; oh = h + 2
-        fill_rect(cv, ox, oy, ow, 1, BLOCK_COLOR)
-        fill_rect(cv, ox, oy + oh - 1, ow, 1, BLOCK_COLOR)
-        fill_rect(cv, ox, oy, 1, oh, BLOCK_COLOR)
-        fill_rect(cv, ox + ow - 1, oy, 1, oh, BLOCK_COLOR)
-
-def draw_attack(cv, p):
-    if p["atk_type"] is None or p["atk_phase"] != "active":
+def draw_ship(cv, p, now):
+    if not p["alive"]:
         return
-    hx, hy, hw, hh = attack_hitbox(p)
-    c = Color(255, 120, 0) if p["atk_type"] == "heavy" else Color(255, 255, 255)
-    fill_rect(cv, hx, hy, hw, 2, c)
+    if now < p["invuln_until"] and int(now * 10) % 2 == 0:
+        return
+    fill_rect(cv, int(p["x"]), int(p["y"]), SHIP_W, SHIP_H, p["color"])
 
-def draw_result_overlay(cv, winner, now):
-    pulse = (math.sin(now * 6) + 1) / 2
-    glow = int(80 + 175 * pulse)
+def draw_bullets(cv, bullets, c):
+    for b in bullets:
+        fill_rect(cv, int(b["x"]), int(b["y"]), BULLET_W, BULLET_H, c)
 
-    if winner == 1:
-        col = Color(0, glow, 0)
-    elif winner == 2:
-        col = Color(0, 0, glow)
-    else:
-        col = Color(glow, glow, 0)
+def draw_enemy_bullets(cv, bullets):
+    for b in bullets:
+        # brighter if dmg=2
+        c = ENEMY_BULLET if b.get("dmg", 1) == 1 else Color(255, 0, 0)
+        fill_rect(cv, int(b["x"]), int(b["y"]), 1, 2, c)
 
-    fill_rect(cv, 0, 22, W, 20, Color(0, 0, 0))
-    for x in range(0, W, 4):
-        fill_rect(cv, x, 22, 2, 20, col)
-    fill_rect(cv, 0, 22, W, 1, col)
-    fill_rect(cv, 0, 41, W, 1, col)
+def draw_enemies(cv, enemies, now):
+    for e in enemies:
+        if not e["alive"]:
+            continue
+        col = ENEMY_HIT_FLASH_COLOR if now < e.get("flash_until", 0.0) else e["color"]
+        fill_rect(cv, int(e["x"]), int(e["y"]), ENEMY_W, ENEMY_H, col)
+
+
+def draw_lives(cv, p, x0):
+    # small life pips under the score area (no text)
+    # x0 is starting x for player region
+    y = UI_H - 4
+    for i in range(START_LIVES):
+        c = p["color"] if i < p["lives"] else Color(15, 15, 15)
+        fill_rect(cv, x0 + i*4, y, 3, 3, c)
+
+def draw_game_over(cv, score):
+    cv.Clear()
+    fill_rect(cv, 0, 18, W, 28, Color(0, 0, 0))
+    draw_score(cv, score)
 
 # ----------------------------
 # MAIN LOOP
 # ----------------------------
-now = time.time()
-last_both_b = 0.0
 exit_mgr = ExitOnBack([pad1, pad2], back_btn=BACK_BTN, quit_only=False)
 
 while True:
@@ -373,40 +646,62 @@ while True:
         matrix.Clear()
         exit_mgr.handle()
 
-    # dt
     dt = now - game["last_t"]
     game["last_t"] = now
     if dt < 0:
-        dt = 0
-    if dt > 0.05:
-        dt = 0.05
+        dt = 0.0
+    if dt > TICK_DT_CAP:
+        dt = TICK_DT_CAP
 
-    p1 = game["p1"]
-    p2 = game["p2"]
+    # game over check
+    check_game_over(game, now)
+    if game["game_over"]:
+        canvas.Clear()
+        draw_game_over(canvas, game["score"])
+        canvas = matrix.SwapOnVSync(canvas)
+        if now >= game["game_over_until"]:
+            game = reset_game(now)
+        continue
 
-    if not game["round_over"]:
-        update_player(p1, p2, dt, now)
-        update_player(p2, p1, dt, now)
+    p1 = game["p1"]; p2 = game["p2"]
 
-        w = compute_winner(p1, p2)
-        if w != 0:
-            game["round_over"] = True
-            game["winner"] = w
-            game["over_until"] = now + 2.5
+    # respawn handling (only while teammate alive)
+    handle_respawn(p1, p2["alive"], now)
+    handle_respawn(p2, p1["alive"], now)
+
+    # player actions
+    if p1["alive"]:
+        move_player(p1, dt)
+        try_fire(p1, now)
+    if p2["alive"]:
+        move_player(p2, dt)
+        try_fire(p2, now)
+
+    # enemies + enemy bullets
+    update_enemies(game, dt)
+    maybe_enemy_fire(game, dt)
+    update_enemy_bullets(game, dt)
+
+    # player bullets -> enemies
+    game["score"] += update_player_bullets(p1, game["enemies"], dt)
+    game["score"] += update_player_bullets(p2, game["enemies"], dt)
+
+    # enemy bullets -> players
+    check_player_hits(game, now)
 
     # DRAW
     canvas.Clear()
-    draw_floor(canvas)
-    draw_attack(canvas, p1)
-    draw_attack(canvas, p2)
-    draw_player(canvas, p1)
-    draw_player(canvas, p2)
-    draw_hp_bars(canvas, p1, p2)
 
-    if game["round_over"]:
-        draw_result_overlay(canvas, game["winner"], now)
-        if now >= game["over_until"]:
-            game = reset_round(now)
+    draw_score(canvas, game["score"])
+    draw_lives(canvas, p1, 2)          # left lives
+    draw_lives(canvas, p2, W - 2 - (START_LIVES*4))  # right lives
+
+    draw_enemies(canvas, game["enemies"], now)
+    draw_ship(canvas, p1, now)
+    draw_ship(canvas, p2, now)
+
+    draw_bullets(canvas, p1["bullets"], p1["bcolor"])
+    draw_bullets(canvas, p2["bullets"], p2["bcolor"])
+    draw_enemy_bullets(canvas, game["enemy_bullets"])
 
     canvas = matrix.SwapOnVSync(canvas)
-

@@ -2,6 +2,7 @@ import os
 import time
 import math
 import pygame
+import re
 from rgbmatrix import RGBMatrix, RGBMatrixOptions, graphics
 from rgbmatrix.graphics import Color
 from games.Utils.menu_utils import ExitOnBack
@@ -28,7 +29,6 @@ from games.Utils.menu_utils import ExitOnBack
 # ----------------------------
 GAMES_DIR = "/home/rpi-kristof/games"
 ONLY_SUFFIX = ".py"
-
 FONT_PATH = "/home/rpi-kristof/rpi-rgb-led-matrix/fonts/6x10.bdf"
 
 A_BTN = 0
@@ -176,13 +176,14 @@ def draw_menu(cv, files, current_idx, now):
         return
 
     name = files[current_idx]
-    base = os.path.splitext(name)[0].upper()
+    raw = os.path.splitext(name)[0]
+    base = re.sub(r'(?<!^)(?=[A-Z])', ' ', raw)
     label = base[:MAX_LABEL_CHARS]
 
     draw_arrow_left_full(cv, accent)
     draw_arrow_right_full(cv, accent)
     draw_text_center_full(cv, 38, label, FG)
-    draw_index_dots_full(cv, current_idx, len(files), TAB, Color(20, 20, 20))
+    draw_index_dots_full(cv, current_idx, len(files), TAB, Color(255, 255, 0))
 
 # ----------------------------
 # INPUT / LAUNCH
