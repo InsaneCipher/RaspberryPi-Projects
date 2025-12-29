@@ -28,18 +28,15 @@ All projects are built for low-resolution displays and controlled using **game c
 - `pygame`
 
 ## Running the Menu
+`python3 menu.py`
 
-```bash
-python3 menu.py
 Games are launched from the menu and return automatically when exited.
 
 Controls
 
-Left stick: Move
-
-A / B / X / Y: Game-specific actions
-
-BACK: Return to menu or quit (handled safely)
+- Left stick: Move
+- A / B / X / Y: Game-specific actions
+- BACK: Return to menu or quit (handled safely)
 
 Notes
 
