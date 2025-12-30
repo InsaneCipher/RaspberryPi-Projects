@@ -148,17 +148,39 @@ def draw_arrow_right_full(cv, color):
 def draw_index_dots_full(cv, current, total, color_on, color_off):
     if total <= 1:
         return
-    shown = min(14, total)
+
+    dots_per_row = 14            # how many dots fit per row on 128px
+    rows = 2
+    shown = min(dots_per_row * rows, total)
+
+    # Map current (0..total-1) into a dot index (0..shown-1)
     dot_i = int((current / (total - 1)) * (shown - 1)) if total > 1 else 0
 
-    y = PANEL_H - 6
-    start_x = (TOTAL_W - (shown * 6 - 2)) // 2
+    # Layout (2 rows near bottom)
+    dot_w = 2
+    dot_h = 2
+    gap_x = 4                    # spacing between dots
+    row_gap = 3                  # spacing between rows
+
+    total_row_w = dots_per_row * (dot_w + gap_x) - gap_x
+    start_x = (TOTAL_W - total_row_w) // 2
+
+    # y positions for two rows
+    y2 = PANEL_H - 4             # bottom row
+    y1 = y2 - (dot_h + row_gap)  # row above
+
     for i in range(shown):
+        row = i // dots_per_row
+        col = i % dots_per_row
+
+        y = y1 if row == 0 else y2
+        x = start_x + col * (dot_w + gap_x)
+
         c = color_on if i == dot_i else color_off
-        x = start_x + i * 6
-        for yy in range(2):
-            for xx in range(2):
+        for yy in range(dot_h):
+            for xx in range(dot_w):
                 set_pixel(cv, x + xx, y + yy, c)
+
 
 def draw_menu(cv, files, current_idx, now):
     clear_all(cv)
