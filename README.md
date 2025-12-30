@@ -50,3 +50,6 @@ License
 
 Personal / educational use.
 Feel free to fork, modify, and experiment.
+
+
+![screenshot](Images/panel.jpg)
