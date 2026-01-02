@@ -1,395 +1,371 @@
+import pygame
 import time
 import math
 import random
-from random import randint
-
-import pygame
 from rgbmatrix import RGBMatrix, RGBMatrixOptions
-from rgbmatrix.graphics import Color
+from rgbmatrix.graphics import Color, DrawText, Font
 from Utils.menu_utils import ExitOnBack
 
-# -------------------------------------------------
-# CO-OP DINO RUN (128x64)
-#
-# Player 1 (Runner):
-# - Jump: A
-# - Duck: hold B
-#
-# Player 2 (Spawner):
-# - A: spawn LOW obstacle (runner must jump)
-# - B: spawn HIGH obstacle (runner must duck)
-# - X: spawn BIRD (mid-height, runner must duck; faster)
-#
-# Rules:
-# - Obstacles move right->left
-# - Collision ends round
-# - Score increases with time survived
-#
-# BACK on either controller returns to menu (ExitOnBack).
-# -------------------------------------------------
+# =========================================================
+# INIT
+# =========================================================
+pygame.init()
+pygame.joystick.init()
 
-# ----------------------------
-# MATRIX CONFIG
-# ----------------------------
+if pygame.joystick.get_count() < 2:
+    print("Two controllers required!")
+    exit(1)
+
+joy1 = pygame.joystick.Joystick(0)
+joy2 = pygame.joystick.Joystick(1)
+joy1.init()
+joy2.init()
+
+# =========================================================
+# MATRIX
+# =========================================================
 options = RGBMatrixOptions()
 options.hardware_mapping = "adafruit-hat"
 options.rows = 64
 options.cols = 64
 options.chain_length = 2
-options.brightness = 50
+options.brightness = 55
 options.gpio_slowdown = 4
 
 matrix = RGBMatrix(options=options)
 canvas = matrix.CreateFrameCanvas()
 
-# ----------------------------
-# PYGAME / CONTROLLERS
-# ----------------------------
-pygame.init()
-pygame.joystick.init()
+# =========================================================
+# FONT
+# =========================================================
+font = Font()
+font.LoadFont("/usr/local/share/rgbmatrix/fonts/6x10.bdf")
 
-if pygame.joystick.get_count() < 2:
-    print("Need two controllers", flush=True)
-    raise SystemExit(1)
-
-pad_run = pygame.joystick.Joystick(0)   # Runner
-pad_spw = pygame.joystick.Joystick(1)   # Spawner
-pad_run.init()
-pad_spw.init()
-
-# ----------------------------
+# =========================================================
 # CONSTANTS
-# ----------------------------
-W, H = 128, 64
+# =========================================================
+WIDTH = 128
+HEIGHT = 64
 
-UI_H = 10
-PLAY_Y0 = UI_H
-GROUND_Y = H - 6  # ground line y
+TANK_SIZE = 4
+TANK_SPEED = 0.25
+BULLET_SPEED = 1.2
+MAX_LIVES = 3
 
-A_BTN = 0
-B_BTN = 1
-X_BTN = 2
-Y_BTN = 3
-BACK_BTN = 6
+GRID_CELL = TANK_SIZE * 2
+OBSTACLE_COUNT = 10
 
-DEADZONE = 0.35
+POWERUP_DURATION = 6
+POWERUP_RESPAWN_TIME = 8
 
-# Colors
-BG = Color(0, 0, 0)
-UI = Color(255, 0, 255)      # magenta
-SEP = Color(30, 30, 30)
+USE_FIXED_MAP = False
+BACK = 6
 
-GROUND_C = Color(40, 40, 40)
-RUNNER_C = Color(0, 255, 0)
-DUCK_C = Color(0, 180, 0)
-OB_LOW_C = Color(255, 0, 0)
-OB_HIGH_C = Color(0, 180, 255)
-OB_LONG_C = Color(0, 180, 255)
-BIRD_C = Color(255, 255, 0)
-HIT_C = Color(255, 255, 255)
+DIR_UP    = -math.pi / 2
+DIR_DOWN  =  math.pi / 2
+DIR_LEFT  =  math.pi
+DIR_RIGHT =  0
 
-# Runner physics
-R_X = 18
-R_W = 6
-R_H_STAND = 10
-R_H_DUCK = 6
+# =========================================================
+# FIXED MAP
+# =========================================================
+FIXED_MAP = [
+    [0,0,0,1,1,1,0,0,0,0,1,1,1,0,0,0],
+    [0,0,0,1,1,1,0,0,0,0,1,1,1,0,0,0],
+    [0,0,0,1,1,1,0,0,0,0,1,1,1,0,0,0],
+    [1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1],
+    [0,0,0,1,1,1,0,0,0,0,1,1,1,0,0,0],
+    [0,0,0,1,1,1,0,0,0,0,1,1,1,0,0,0],
+    [0,0,0,1,1,1,0,0,0,0,1,1,1,0,0,0],
+    [0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0]
+]
 
-GRAVITY = 280.0
-JUMP_VEL = -110.0
-JUMP_COOLDOWN = 0.12
-DIFF_RATE = 0.05        # 5% faster per second (tune)
-DIFF_MAX  = 3.0         # cap so it doesn't get ridiculous
-
-
-# Obstacles
-OB_SPEED_BASE = 48.0
-OB_SPEED_RAMP = 0.7      # px/s per second survived
-SPAWN_COOLDOWN = 0.9    # spawner cannot spam instantly
-MAX_OBS = 10
-
-GRAVITY_BASE = GRAVITY
-JUMP_VEL_BASE = JUMP_VEL
-OB_SPEED_BASE_CONST = OB_SPEED_BASE
-SPAWN_COOLDOWN_BASE = SPAWN_COOLDOWN   # your current 0.9
-SPAWN_COOLDOWN_MIN  = 0.6             # hard lower limit (tune)
-
-
-
-# Game over
-OVER_SHOW = 2.0
-
-DT_CAP = 0.05
-
-# ----------------------------
-# 3x5 DIGITS (score)
-# ----------------------------
-DIG3x5 = {
-    "0": ["111","101","101","101","111"],
-    "1": ["010","110","010","010","111"],
-    "2": ["111","001","111","100","111"],
-    "3": ["111","001","111","001","111"],
-    "4": ["101","101","111","001","001"],
-    "5": ["111","100","111","001","111"],
-    "6": ["111","100","111","101","111"],
-    "7": ["111","001","001","010","010"],
-    "8": ["111","101","111","101","111"],
-    "9": ["111","101","111","001","111"],
-}
-
-def set_px(cv, x, y, c):
-    if 0 <= x < W and 0 <= y < H:
-        cv.SetPixel(int(x), int(y), c.red, c.green, c.blue)
-
-def fill_rect(cv, x0, y0, w, h, c):
-    x1, y1 = x0 + w, y0 + h
-    if x1 <= 0 or y1 <= 0 or x0 >= W or y0 >= H:
-        return
-    x0 = max(0, int(x0)); y0 = max(0, int(y0))
-    x1 = min(W, int(x1)); y1 = min(H, int(y1))
-    for yy in range(y0, y1):
-        for xx in range(x0, x1):
-            cv.SetPixel(xx, yy, c.red, c.green, c.blue)
-
-def draw_digit3x5(cv, x, y, ch, color, scale=2):
-    glyph = DIG3x5.get(ch)
-    if not glyph:
-        return
-    for gy in range(5):
-        row = glyph[gy]
-        for gx in range(3):
-            if row[gx] == "1":
-                for sy in range(scale):
-                    for sx in range(scale):
-                        set_px(cv, x + gx*scale + sx, y + gy*scale + sy, color)
-
-def draw_score(cv, score):
-    s = str(max(0, int(score)))
-    scale = 2
-    digit_w = 3*scale
-    gap = 1*scale
-    total_w = len(s)*digit_w + (len(s)-1)*gap
-    x0 = (W - total_w) // 2
-    y0 = 1
-    for i, ch in enumerate(s):
-        draw_digit3x5(cv, x0 + i*(digit_w+gap), y0, ch, UI, scale=scale)
-
-def draw_ui(cv, score):
-    draw_score(cv, score)
-    for x in range(W):
-        set_px(cv, x, UI_H, SEP)
-
-def rects_overlap(ax, ay, aw, ah, bx, by, bw, bh):
-    return not (ax + aw <= bx or bx + bw <= ax or ay + ah <= by or by + bh <= ay)
-
-# ----------------------------
-# GAME STATE
-# ----------------------------
-def reset_game(now):
+# =========================================================
+# DATA STRUCTURES
+# =========================================================
+def create_tank(x, y, color):
     return {
-        "ry": float(GROUND_Y - R_H_STAND),
-        "rvy": 0.0,
-        "duck": False,
-        "on_ground": True,
-        "jump_cd_until": 0.0,
-
-        "obs": [],  # each: {x,y,w,h,type,color}
-        "spw_cd_until": 0.0,
-
-        "t0": now,
-        "score": 0,
-
-        "hit": False,
-        "hit_until": 0.0,
-
-        "last_t": now,
+        "x": x,
+        "y": y,
+        "angle": DIR_RIGHT,
+        "lives": MAX_LIVES,
+        "bullets": [],
+        "color": color,
+        "rapid": False,
+        "rapid_end": 0
     }
 
-game = reset_game(time.time())
+tank1 = create_tank(16, 32, Color(0, 255, 0))   # green tank
+tank2 = create_tank(112, 32, Color(0, 0, 255))  # blue tank
 
-def runner_rect(g):
-    h = R_H_DUCK if g["duck"] else R_H_STAND
-    y = g["ry"] + (R_H_STAND - h)  # keep feet aligned to ground
-    return int(R_X), int(y), R_W, h
+explosions = []
+powerup = None
+last_powerup_time = time.time()
 
-def spawn_obstacle(kind, g, now):
-    if now < g["spw_cd_until"]:
-        return
-    if len(g["obs"]) >= MAX_OBS:
-        return
-
-    # baseline speed ramps with time; store type only
-    x = float(W + 2)
-
-    if kind == "low":
-        w, h = 6, 10
-        y = float(GROUND_Y - h)
-        c = OB_LOW_C
-    elif kind == "high":
-        w, h = 6, 14
-        y = float(GROUND_Y - h)
-        c = OB_HIGH_C
-    elif kind == "long":
-        w, h = 12, 10
-        y = float(GROUND_Y - h)
-        c = OB_LONG_C
-    else:  # "bird"
-        w, h = 8, 4
-        y = float(GROUND_Y - round(randint(4, 30)))  # mid height
-        c = BIRD_C
-
-    g["obs"].append({"x": x, "y": y, "w": w, "h": h, "type": kind, "c": c})
-    alive_time = now - g["t0"]
-    g["spw_cd_until"] = now + spawn_cooldown(alive_time)
-
-
-# ----------------------------
-# UPDATE
-# ----------------------------
-def update_runner(g, dt, now):
-    alive_time = now - g["t0"]
-    m = diff_mult(alive_time)
-
-    gravity = GRAVITY_BASE * m
-    jump_vel = JUMP_VEL_BASE * math.sqrt(m)
-
-    g["duck"] = bool(pad_run.get_button(B_BTN)) and g["on_ground"]
-
-    if pad_run.get_button(A_BTN) and g["on_ground"] and now >= g["jump_cd_until"]:
-        g["rvy"] = jump_vel
-        g["on_ground"] = False
-        g["jump_cd_until"] = now + JUMP_COOLDOWN
-
-    g["rvy"] += gravity * dt
-    g["ry"] += g["rvy"] * dt
-
-    stand_y = float(GROUND_Y - R_H_STAND)
-    if g["ry"] >= stand_y:
-        g["ry"] = stand_y
-        g["rvy"] = 0.0
-        g["on_ground"] = True
+# =========================================================
+# MAP GENERATION
+# =========================================================
+def generate_obstacles():
+    obs = []
+    if USE_FIXED_MAP:
+        for r in range(len(FIXED_MAP)):
+            for c in range(len(FIXED_MAP[0])):
+                if FIXED_MAP[r][c]:
+                    obs.append({
+                        "x": c * GRID_CELL,
+                        "y": r * GRID_CELL,
+                        "w": GRID_CELL,
+                        "h": GRID_CELL
+                    })
     else:
-        g["on_ground"] = False
+        for _ in range(OBSTACLE_COUNT):
+            w = random.randint(6, 16)
+            h = random.randint(6, 16)
+            x = random.randint(0, WIDTH - w)
+            y = random.randint(0, HEIGHT - h)
+            obs.append({"x": x, "y": y, "w": w, "h": h})
+    return obs
 
+obstacles = generate_obstacles()
 
-def update_spawner(g, now):
-    if pad_spw.get_button(A_BTN):
-        spawn_obstacle("low", g, now)
-    elif pad_spw.get_button(B_BTN):
-        spawn_obstacle("high", g, now)
-    elif pad_spw.get_button(X_BTN):
-        spawn_obstacle("bird", g, now)
-    elif pad_spw.get_button(Y_BTN):
-        spawn_obstacle("long", g, now)
+# =========================================================
+# SAFETY
+# =========================================================
+def is_position_free(x, y):
+    for o in obstacles:
+        if (o["x"] - TANK_SIZE <= x <= o["x"] + o["w"] + TANK_SIZE and
+            o["y"] - TANK_SIZE <= y <= o["y"] + o["h"] + TANK_SIZE):
+            return False
+    return True
 
-def update_obstacles(g, dt, now):
-    alive_time = now - g["t0"]
-    m = diff_mult(alive_time)
-
-    speed = (OB_SPEED_BASE_CONST + alive_time * OB_SPEED_RAMP) * m
-
-    out = []
-    for ob in g["obs"]:
-        spd = speed * 1
-        ob["x"] -= spd * dt
-        if ob["x"] + ob["w"] < 0:
-            continue
-        out.append(ob)
-    g["obs"] = out
-
-
-def check_collisions(g, now):
-    rx, ry, rw, rh = runner_rect(g)
-    for ob in g["obs"]:
-        if rects_overlap(rx, ry, rw, rh, int(ob["x"]), int(ob["y"]), ob["w"], ob["h"]):
-            g["hit"] = True
-            g["hit_until"] = now + OVER_SHOW
+def spawn_tank_safe(tank, x, y):
+    if is_position_free(x, y):
+        tank["x"], tank["y"] = x, y
+        return
+    for _ in range(200):
+        nx = random.randint(TANK_SIZE, WIDTH - TANK_SIZE)
+        ny = random.randint(TANK_SIZE, HEIGHT - TANK_SIZE)
+        if is_position_free(nx, ny):
+            tank["x"], tank["y"] = nx, ny
             return
 
-def update_score(g, now):
-    g["score"] = int((now - g["t0"]) * 10)  # 10 points per second
+def spawn_powerup():
+    for _ in range(1000):  # more attempts to ensure not in wall
+        x = random.randint(6, WIDTH - 6)
+        y = random.randint(6, HEIGHT - 6)
+        if is_position_free(x, y):
+            return {"x": x, "y": y, "type": "RAPID"}
+    return None
 
-def diff_mult(alive_time: float) -> float:
-    # exponential feels smooth; same idea works with linear too
-    return min(DIFF_MAX, 1.0 + alive_time * DIFF_RATE)
+# =========================================================
+# DRAWING
+# =========================================================
+def draw_tank(tank):
+    cx, cy = int(tank["x"]), int(tank["y"])
 
-def spawn_cooldown(alive_time: float) -> float:
-    return max(
-        SPAWN_COOLDOWN_MIN,
-        SPAWN_COOLDOWN_BASE / (1.0 + alive_time * 0.01)
-    )
+    # Tank body
+    for y in range(-TANK_SIZE, TANK_SIZE):
+        for x in range(-TANK_SIZE, TANK_SIZE):
+            canvas.SetPixel(cx + x, cy + y,
+                            tank["color"].red,
+                            tank["color"].green,
+                            tank["color"].blue)
 
+    # Barrel 2px wide, centered
+    perp_x = -math.sin(tank["angle"])
+    perp_y =  math.cos(tank["angle"])
 
+    for i in range(6):
+        bx = cx + math.cos(tank["angle"]) * (TANK_SIZE - 1 + i)
+        by = cy + math.sin(tank["angle"]) * (TANK_SIZE - 1 + i)
 
-# ----------------------------
-# DRAW
-# ----------------------------
-def draw_ground(cv):
-    for x in range(W):
-        set_px(cv, x, GROUND_Y, GROUND_C)
-        set_px(cv, x, GROUND_Y + 1, GROUND_C)
+        canvas.SetPixel(int(bx + perp_x * 0.5), int(by + perp_y * 0.5), 255,255,255)
+        canvas.SetPixel(int(bx - perp_x * 0.5), int(by - perp_y * 0.5), 255,255,255)
 
-def draw_runner(cv, g, now):
-    rx, ry, rw, rh = runner_rect(g)
-    c = HIT_C if g["hit"] else (DUCK_C if g["duck"] else RUNNER_C)
-    fill_rect(cv, rx, ry, rw, rh, c)
+    # Draw indicator if rapid active
+    if tank["rapid"]:
+        for i in range(-TANK_SIZE, TANK_SIZE):
+            canvas.SetPixel(cx + i, cy - TANK_SIZE - 1, 255, 255, 0)
 
-    # tiny "eye" pixel when standing
-    if not g["duck"] and not g["hit"]:
-        set_px(cv, rx + rw - 2, ry + 2, Color(0, 0, 0))
+def draw_obstacles():
+    for o in obstacles:
+        for y in range(o["h"]):
+            for x in range(o["w"]):
+                canvas.SetPixel(int(o["x"]+x), int(o["y"]+y), 255,0,0)
 
-def draw_obstacles(cv, g):
-    for ob in g["obs"]:
-        fill_rect(cv, int(ob["x"]), int(ob["y"]), ob["w"], ob["h"], ob["c"])
+def draw_powerup():
+    if not powerup:
+        return
+    x, y = int(powerup["x"]), int(powerup["y"])
+    canvas.SetPixel(x, y, 255,255,0)
+    canvas.SetPixel(x-1, y, 255,255,0)
+    canvas.SetPixel(x+1, y, 255,255,0)
+    canvas.SetPixel(x, y-1, 255,255,0)
+    canvas.SetPixel(x, y+1, 255,255,0)
 
-def draw_game_over(cv):
-    fill_rect(cv, 0, 18, W, 28, Color(0, 0, 0))
-    for x in range(0, W, 4):
-        fill_rect(cv, x, 18, 2, 28, Color(255, 0, 255))
+def draw_bullets(tank):
+    for b in tank["bullets"]:
+        canvas.SetPixel(int(b["x"]), int(b["y"]), 255,255,0)
 
-# ----------------------------
+def draw_lives(tank, x):
+    for i in range(tank["lives"]):
+        canvas.SetPixel(x+i*3, 2, tank["color"].red, tank["color"].green, tank["color"].blue)
+
+def draw_explosions():
+    for e in explosions:
+        for y in range(-e["radius"], e["radius"]):
+            for x in range(-e["radius"], e["radius"]):
+                canvas.SetPixel(int(e["x"]+x), int(e["y"]+y), 255,120,0)
+
+# =========================================================
+# GAME LOGIC
+# =========================================================
+def collide_with_obstacles(x, y):
+    for o in obstacles:
+        if o["x"] <= x < o["x"]+o["w"] and o["y"] <= y < o["y"]+o["h"]:
+            return True
+    return False
+
+def check_powerup_pickup(tank):
+    global powerup
+    if powerup and abs(tank["x"]-powerup["x"]) < TANK_SIZE and abs(tank["y"]-powerup["y"]) < TANK_SIZE:
+        tank["rapid"] = True
+        tank["rapid_end"] = time.time() + POWERUP_DURATION
+        powerup = None
+
+def update_tank(tank, joy):
+    lx, ly = joy.get_axis(0), joy.get_axis(1)
+
+    # 4-way direction
+    if abs(lx) > abs(ly):
+        if lx > 0.5: tank["angle"] = DIR_RIGHT
+        elif lx < -0.5: tank["angle"] = DIR_LEFT
+    else:
+        if ly > 0.5: tank["angle"] = DIR_DOWN
+        elif ly < -0.5: tank["angle"] = DIR_UP
+
+    dx, dy = math.cos(tank["angle"]), math.sin(tank["angle"])
+
+    # Forward
+    if joy.get_axis(5) > 0.5:
+        nx, ny = tank["x"] + dx*TANK_SPEED, tank["y"] + dy*TANK_SPEED
+        if not collide_with_obstacles(nx, ny):
+            tank["x"], tank["y"] = nx, ny
+
+    # Backward
+    if joy.get_axis(2) > 0.5:
+        nx, ny = tank["x"] - dx*TANK_SPEED, tank["y"] - dy*TANK_SPEED
+        if not collide_with_obstacles(nx, ny):
+            tank["x"], tank["y"] = nx, ny
+
+    # Wrap-around screen
+    if tank["x"] < 0: tank["x"] = WIDTH - 1
+    if tank["x"] >= WIDTH: tank["x"] = 0
+    if tank["y"] < 0: tank["y"] = HEIGHT - 1
+    if tank["y"] >= HEIGHT: tank["y"] = 0
+
+    # Shooting
+    max_bullets = 2 if tank["rapid"] else 1
+    if joy.get_button(0) and len(tank["bullets"]) < max_bullets:
+        tank["bullets"].append({
+            "x": tank["x"],
+            "y": tank["y"],
+            "dx": dx * BULLET_SPEED,
+            "dy": dy * BULLET_SPEED
+        })
+
+    check_powerup_pickup(tank)
+
+def update_bullets(attacker, target):
+    for b in attacker["bullets"][:]:
+        b["x"] += b["dx"]
+        b["y"] += b["dy"]
+
+        if abs(b["x"]-target["x"]) < TANK_SIZE and abs(b["y"]-target["y"]) < TANK_SIZE:
+            attacker["bullets"].remove(b)
+            target["lives"] -= 1
+            explosions.append({"x":b["x"],"y":b["y"],"radius":1})
+        elif collide_with_obstacles(b["x"], b["y"]):
+            attacker["bullets"].remove(b)
+            explosions.append({"x":b["x"],"y":b["y"],"radius":1})
+        elif not (0<=b["x"]<WIDTH and 0<=b["y"]<HEIGHT):
+            attacker["bullets"].remove(b)
+
+def update_explosions():
+    for e in explosions[:]:
+        e["radius"] += 1
+        if e["radius"] > 6:
+            explosions.remove(e)
+
+# =========================================================
 # MAIN LOOP
-# ----------------------------
-exit_mgr = ExitOnBack([pad_run, pad_spw], back_btn=BACK_BTN, quit_only=False)
+# =========================================================
+exit_mgr = ExitOnBack([joy1, joy2], back_btn=BACK, quit_only=False)
+winner = None
+winner_time = None
+
+spawn_tank_safe(tank1, 16, 32)
+spawn_tank_safe(tank2, 112, 32)
 
 while True:
     pygame.event.pump()
-    now = time.time()
+    canvas.Clear()
 
     if exit_mgr.should_exit():
         matrix.Clear()
         exit_mgr.handle()
 
-    dt = now - game["last_t"]
-    game["last_t"] = now
-    if dt < 0:
-        dt = 0.0
-    if dt > DT_CAP:
-        dt = DT_CAP
+    # Spawn powerup
+    if not powerup and time.time() - last_powerup_time > POWERUP_RESPAWN_TIME:
+        powerup = spawn_powerup()
+        last_powerup_time = time.time()
 
-    if game["hit"]:
-        canvas.Clear()
-        draw_ui(canvas, game["score"])
-        draw_ground(canvas)
-        draw_obstacles(canvas, game)
-        draw_runner(canvas, game, now)
-        draw_game_over(canvas)
-        canvas = matrix.SwapOnVSync(canvas)
+    # Reset rapid powerup
+    for t in (tank1, tank2):
+        if t["rapid"] and time.time() > t["rapid_end"]:
+            t["rapid"] = False
 
-        if now >= game["hit_until"]:
-            game = reset_game(now)
-        continue
+    # Game logic
+    if winner is None:
+        update_tank(tank1, joy1)
+        update_tank(tank2, joy2)
+        update_bullets(tank1, tank2)
+        update_bullets(tank2, tank1)
 
-    # update
-    update_runner(game, dt, now)
-    update_spawner(game, now)
-    update_obstacles(game, dt, now)
-    check_collisions(game, now)
-    update_score(game, now)
+        if tank1["lives"] <= 0:
+            winner, winner_time = "BLUE", time.time()
+        elif tank2["lives"] <= 0:
+            winner, winner_time = "GREEN", time.time()
 
-    # draw
-    canvas.Clear()
-    draw_ui(canvas, game["score"])
-    draw_ground(canvas)
-    draw_obstacles(canvas, game)
-    draw_runner(canvas, game, now)
+    update_explosions()
+
+    # Draw everything
+    draw_obstacles()
+    draw_powerup()
+    draw_tank(tank1)
+    draw_tank(tank2)
+    draw_bullets(tank1)
+    draw_bullets(tank2)
+    draw_explosions()
+    draw_lives(tank1, 4)
+    draw_lives(tank2, WIDTH-12)
+
+    # Winner display
+    if winner:
+        text = f"{winner} WINS"
+        w = len(text) * 6
+        for y in range(24, 36):
+            for x in range(40, 40 + w):
+                canvas.SetPixel(x, y, 0, 0, 0)
+        DrawText(canvas, font, 40, 34, Color(255,255,255), text)
+
+        if time.time() - winner_time > 2:
+            obstacles = generate_obstacles()
+            explosions.clear()
+            tank1["lives"] = tank2["lives"] = MAX_LIVES
+            spawn_tank_safe(tank1, 16, 32)
+            spawn_tank_safe(tank2, 112, 32)
+            winner = None
+
     canvas = matrix.SwapOnVSync(canvas)
+    time.sleep(0.01)
