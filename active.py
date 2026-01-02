@@ -80,6 +80,15 @@ FIXED_MAP = [
     [0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0]
 ]
 
+# Tile grid for obstacles (same sized tiles)
+TILE = 8                         # 8px tiles -> 16x8 grid on 128x64
+GRID_COLS = WIDTH // TILE        # 16
+GRID_ROWS = HEIGHT // TILE       # 8
+
+OBSTACLE_TILES = 18              # number of obstacle tiles to place
+SPAWN_BUFFER_TILES = 1           # keep obstacles away from spawn tiles (radius in tiles)
+
+
 # =========================================================
 # DATA STRUCTURES
 # =========================================================
@@ -101,42 +110,61 @@ tank2 = create_tank(112, 32, Color(0, 0, 255))  # blue tank
 explosions = []
 powerup = None
 last_powerup_time = time.time()
+obstacles = []
 
 # =========================================================
 # MAP GENERATION
 # =========================================================
+def tank_tile(tank):
+    return (int(tank["x"]) // TILE, int(tank["y"]) // TILE)
+
+def tiles_in_radius(cx, cy, r):
+    out = set()
+    for ty in range(cy - r, cy + r + 1):
+        for tx in range(cx - r, cx + r + 1):
+            if 0 <= tx < GRID_COLS and 0 <= ty < GRID_ROWS:
+                out.add((tx, ty))
+    return out
+
 def generate_obstacles():
+    # returns list of obstacle rects in pixels: {x,y,w,h}
     obs = []
+
+    # If using fixed map, convert it into TILE-sized obstacles.
+    # FIXED_MAP is currently 16x8 which matches TILE=8 perfectly.
     if USE_FIXED_MAP:
         for r in range(len(FIXED_MAP)):
             for c in range(len(FIXED_MAP[0])):
                 if FIXED_MAP[r][c]:
-                    obs.append({
-                        "x": c * GRID_CELL,
-                        "y": r * GRID_CELL,
-                        "w": GRID_CELL,
-                        "h": GRID_CELL
-                    })
-    else:
-        for _ in range(OBSTACLE_COUNT):
-            w = random.randint(6, 16)
-            h = random.randint(6, 16)
-            x = random.randint(0, WIDTH - w)
-            y = random.randint(0, HEIGHT - h)
-            obs.append({"x": x, "y": y, "w": w, "h": h})
-    return obs
+                    obs.append({"x": c * TILE, "y": r * TILE, "w": TILE, "h": TILE})
+        return obs
 
-obstacles = generate_obstacles()
+    # Random tiled map
+    # build a set of forbidden tiles around both tanks
+    t1x, t1y = tank_tile(tank1)
+    t2x, t2y = tank_tile(tank2)
+
+    forbidden = set()
+    forbidden |= tiles_in_radius(t1x, t1y, SPAWN_BUFFER_TILES)
+    forbidden |= tiles_in_radius(t2x, t2y, SPAWN_BUFFER_TILES)
+
+    all_tiles = [(x, y) for y in range(GRID_ROWS) for x in range(GRID_COLS)]
+    candidates = [t for t in all_tiles if t not in forbidden]
+
+    random.shuffle(candidates)
+    chosen = candidates[:min(OBSTACLE_TILES, len(candidates))]
+
+    for (tx, ty) in chosen:
+        obs.append({"x": tx * TILE, "y": ty * TILE, "w": TILE, "h": TILE})
+
+    return obs
 
 # =========================================================
 # SAFETY
 # =========================================================
 def is_position_free(x, y):
-    for o in obstacles:
-        if (o["x"] - TANK_SIZE <= x <= o["x"] + o["w"] + TANK_SIZE and
-            o["y"] - TANK_SIZE <= y <= o["y"] + o["h"] + TANK_SIZE):
-            return False
-    return True
+    return not tank_hits_obstacle(x, y)
+
 
 def spawn_tank_safe(tank, x, y):
     if is_position_free(x, y):
@@ -249,13 +277,17 @@ def update_tank(tank, joy):
     # Forward
     if joy.get_axis(5) > 0.5:
         nx, ny = tank["x"] + dx*TANK_SPEED, tank["y"] + dy*TANK_SPEED
-        if not collide_with_obstacles(nx, ny):
+        nx = wrap(nx, WIDTH)
+        ny = wrap(ny, HEIGHT)
+        if not tank_hits_obstacle(nx, ny):
             tank["x"], tank["y"] = nx, ny
 
     # Backward
     if joy.get_axis(2) > 0.5:
         nx, ny = tank["x"] - dx*TANK_SPEED, tank["y"] - dy*TANK_SPEED
-        if not collide_with_obstacles(nx, ny):
+        nx = wrap(nx, WIDTH)
+        ny = wrap(ny, HEIGHT)
+        if not tank_hits_obstacle(nx, ny):
             tank["x"], tank["y"] = nx, ny
 
     # Wrap-around screen
@@ -285,7 +317,7 @@ def update_bullets(attacker, target):
             attacker["bullets"].remove(b)
             target["lives"] -= 1
             explosions.append({"x":b["x"],"y":b["y"],"radius":1})
-        elif collide_with_obstacles(b["x"], b["y"]):
+        elif bullet_hits_obstacle(b["x"], b["y"]):
             attacker["bullets"].remove(b)
             explosions.append({"x":b["x"],"y":b["y"],"radius":1})
         elif not (0<=b["x"]<WIDTH and 0<=b["y"]<HEIGHT):
@@ -297,6 +329,34 @@ def update_explosions():
         if e["radius"] > 6:
             explosions.remove(e)
 
+def wrap(v, maxv):
+    if v < 0: return maxv - 1
+    if v >= maxv: return 0
+    return v
+
+def rects_overlap(ax, ay, aw, ah, bx, by, bw, bh):
+    return not (ax + aw <= bx or bx + bw <= ax or ay + ah <= by or by + bh <= ay)
+
+def tank_rect_at(x, y):
+    # your tank draw is from -TANK_SIZE..+TANK_SIZE, so width/height ~ 2*TANK_SIZE
+    s = TANK_SIZE * 2
+    return (x - TANK_SIZE, y - TANK_SIZE, s, s)
+
+def tank_hits_obstacle(nx, ny):
+    rx, ry, rw, rh = tank_rect_at(nx, ny)
+    for o in obstacles:
+        if rects_overlap(rx, ry, rw, rh, o["x"], o["y"], o["w"], o["h"]):
+            return True
+    return False
+
+def bullet_hits_obstacle(bx, by):
+    # bullet treated as a single pixel
+    for o in obstacles:
+        if o["x"] <= bx < o["x"] + o["w"] and o["y"] <= by < o["y"] + o["h"]:
+            return True
+    return False
+
+
 # =========================================================
 # MAIN LOOP
 # =========================================================
@@ -306,6 +366,7 @@ winner_time = None
 
 spawn_tank_safe(tank1, 16, 32)
 spawn_tank_safe(tank2, 112, 32)
+obstacles = generate_obstacles()
 
 while True:
     pygame.event.pump()
@@ -360,11 +421,20 @@ while True:
         DrawText(canvas, font, 40, 34, Color(255,255,255), text)
 
         if time.time() - winner_time > 2:
-            obstacles = generate_obstacles()
             explosions.clear()
             tank1["lives"] = tank2["lives"] = MAX_LIVES
+
+            # place tanks first
             spawn_tank_safe(tank1, 16, 32)
             spawn_tank_safe(tank2, 112, 32)
+
+            # then generate obstacles avoiding their tiles
+            obstacles = generate_obstacles()
+
+            # final safety pass (rare edge cases if tank got moved)
+            spawn_tank_safe(tank1, tank1["x"], tank1["y"])
+            spawn_tank_safe(tank2, tank2["x"], tank2["y"])
+
             winner = None
 
     canvas = matrix.SwapOnVSync(canvas)

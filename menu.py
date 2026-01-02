@@ -7,6 +7,8 @@ from rgbmatrix import RGBMatrix, RGBMatrixOptions, graphics
 from rgbmatrix.graphics import Color
 from games.Utils.menu_utils import ExitOnBack
 
+# scp active.py rpi-kristof@192.168.0.200:~/games/TestA.py
+
 # -------------------------------------------------
 # CAROUSEL GAME MENU (LED MATRIX, BDF FONT, BOTH PANELS AS ONE)
 #

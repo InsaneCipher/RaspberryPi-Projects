@@ -66,8 +66,10 @@ BACK_BTN = 6
 DT_CAP = 0.05
 ROUND_SHOW_TIME = 2.2
 WIN_SHOW_TIME = 3.0
+REVEAL_SHOW_TIME = 2.5
 
-TARGET_COINS = 5
+START_COINS = 5
+TARGET_COINS = 10
 
 # Layout
 UI_H = 10                 # top UI strip for coins + dealer
@@ -309,7 +311,7 @@ def new_player(pad, color):
         "hand": [],
         "stood": False,
         "bust": False,
-        "coins": 0,
+        "coins": START_COINS,
         "edge": EdgeButtons(pad),
         "result": 0,   # -1 lose, 0 push/none, +1 win
     }
@@ -326,6 +328,10 @@ def reset_round(g):
 
     g["round_over"] = False
     g["round_over_until"] = 0.0
+    g["reveal_until"] = 0.0
+    g["reveal_active"] = False
+    g["pending_resolve"] = False
+
 
 def reset_game(now):
     g = {
@@ -405,6 +411,50 @@ def resolve_round(g):
 
     g["round_over"] = True
     g["round_over_until"] = time.time() + ROUND_SHOW_TIME
+
+def start_reveal_phase(g, now):
+    # dealer finishes their hand and we reveal everything
+    dealer_play(g)  # sets g["dealer_reveal"]=True and draws to 17+
+    g["reveal_active"] = True
+    g["reveal_until"] = now + REVEAL_SHOW_TIME
+
+def finish_round_and_score(g, now):
+    # compute results + coins AFTER reveal time
+    d_total = hand_total(g["dealer_hand"])
+    d_bust = d_total > 21
+
+    for p in (g["p1"], g["p2"]):
+        t = hand_total(p["hand"])
+        if t > 21:
+            p["result"] = -1
+        else:
+            if d_bust:
+                p["result"] = +1
+            else:
+                if t > d_total:
+                    p["result"] = +1
+                elif t < d_total:
+                    p["result"] = -1
+                else:
+                    p["result"] = 0
+
+        p["coins"] += p["result"]
+
+    # check match winner
+    if g["p1"]["coins"] >= TARGET_COINS and g["p2"]["coins"] >= TARGET_COINS:
+        g["game_winner"] = 0
+        g["game_win_until"] = now + WIN_SHOW_TIME
+    elif g["p1"]["coins"] >= TARGET_COINS:
+        g["game_winner"] = 1
+        g["game_win_until"] = now + WIN_SHOW_TIME
+    elif g["p2"]["coins"] >= TARGET_COINS:
+        g["game_winner"] = 2
+        g["game_win_until"] = now + WIN_SHOW_TIME
+
+    g["round_over"] = True
+    g["round_over_until"] = now + ROUND_SHOW_TIME
+    g["reveal_active"] = False
+
 
 # ----------------------------
 # DRAW
@@ -620,7 +670,21 @@ while True:
                 reset_round(game)
         continue
 
-    # normal round: hide dealer card until resolve
+    # --- REVEAL PHASE (after both players finished) ---
+    if game.get("reveal_active", False):
+        # show full dealer + player hands for a moment
+        if now >= game["reveal_until"]:
+            finish_round_and_score(game, now)
+
+        canvas.Clear()
+        draw_ui(canvas, game)
+        draw_separator_lines(canvas)
+        draw_round_state(canvas, game)  # dealer_reveal is True here
+        canvas = matrix.SwapOnVSync(canvas)
+        continue
+
+    # --- NORMAL ROUND ---
+    # hide dealer card during play
     game["dealer_reveal"] = False
 
     # update player inputs/actions
@@ -632,9 +696,16 @@ while True:
         if (not p["bust"]) and (len(p["hand"]) >= 3):
             p["stood"] = True
 
-    # if both players done, resolve
+    # if both players done, start reveal phase (DON'T score yet)
     if (game["p1"]["stood"] or game["p1"]["bust"]) and (game["p2"]["stood"] or game["p2"]["bust"]):
-        resolve_round(game)
+        start_reveal_phase(game, now)
+
+    # draw current play frame
+    canvas.Clear()
+    draw_ui(canvas, game)
+    draw_separator_lines(canvas)
+    draw_round_state(canvas, game)
+    canvas = matrix.SwapOnVSync(canvas)
 
     # DRAW
     canvas.Clear()
